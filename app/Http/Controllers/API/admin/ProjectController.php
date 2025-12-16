@@ -14,9 +14,11 @@ use App\Models\WorkSession;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
+
+
 class ProjectController extends Controller
 {
-    public function index()
+    public function index(Request $request)
 {
     $statusOrder = [
         'On Hold' => 1,
@@ -29,9 +31,12 @@ class ProjectController extends Controller
     ];
 
     // ✅ Fetch all projects with relations
-    $projects = Project::latest()
-        ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
-        ->get();
+   $projects = Project::latest()
+            ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+            ->when($request->customer_id, function ($query) use ($request) {
+                $query->where('customer_id', $request->customer_id);
+            })
+            ->get();
 
     // ✅ Group projects by status
     $grouped = [];
@@ -207,6 +212,20 @@ class ProjectController extends Controller
             $proj_assignee->project_id = $project->id;
             $proj_assignee->save();
 
+
+             $user = User::find($request->employee_ids[$i]);
+             $projectId = $project->id;
+
+            if($user){
+
+                $project_detail = Project::find($projectId);
+                $from_user = User::find(\Auth::user()->id);
+                $nature = "primary";
+                $message = $from_user->name . " has assigned you a job " . $project_detail->project_name;
+
+                insertNotificationWithNature($user->id, \Auth::user()->id, "project_assigned", $message, $nature, $projectId);
+            }
+
         }
 
         //ending add project assignees
@@ -219,38 +238,62 @@ class ProjectController extends Controller
 
     public function updateProjectAssignees(Request $request)
     {
+        $projectId = $request->project_id;
+        $newEmployeeIds = $request->employee_ids ?? [];
 
-        if (count($request->employee_ids) > 0) {
+        // STEP 1: Get old assignees before deleting
+        $oldEmployeeIds = ProjectAssignee::where('project_id', $projectId)
+                            ->pluck('employee_id')
+                            ->toArray();
 
-            ProjectAssignee::where('project_id', $request->project_id)->delete();
+        // STEP 2: Find ONLY the newly added employees
+        $newlyAdded = array_diff($newEmployeeIds, $oldEmployeeIds);
 
-            for ($i = 0; $i < count($request->employee_ids); $i++) {
+        // STEP 3: Delete old records
+        ProjectAssignee::where('project_id', $projectId)->delete();
 
-                $proj_assignee = new ProjectAssignee();
-                $proj_assignee->employee_id = $request->employee_ids[$i];
-                $proj_assignee->project_id = $request->project_id;
-                $proj_assignee->save();
-
-                $user = User::find($request->employee_ids[$i]);
-
-                if ($user && $user->fcm_token) {
-
-                    FirebaseHelper::sendFcmNotification($user->fcm_token, "New Task", "A task/project was assigned.");
-
-                }
-
-            }
-
+        // STEP 4: Insert new assignees
+        foreach ($newEmployeeIds as $empId) {
+            ProjectAssignee::create([
+                'employee_id' => $empId,
+                'project_id' => $projectId,
+            ]);
         }
 
-        $project = Project::find($request->project_id);
+        // STEP 5: Send FCM notification ONLY to newly added employees
+        foreach ($newlyAdded as $empId) {
+            $user = User::find($empId);
+
+            if ($user && $user->fcm_token) {
+                FirebaseHelper::sendFcmNotification(
+                    $user->fcm_token,
+                    "New Task",
+                    "A new task/project has been assigned to you."
+                );
+            }
+
+            if($user){
+
+                $project_detail = Project::find($projectId);
+                $from_user = User::find(\Auth::user()->id);
+                $nature = "primary";
+                $message = $from_user->name . " has assigned you a job " . $project_detail->project_name;
+
+                insertNotificationWithNature($user->id, \Auth::user()->id, "project_assigned", $message, $nature, $projectId);
+
+            }
+        }
+
+        $project = Project::find($projectId);
+
+
 
         return response()->json([
-            'message' => 'Project created successfully.',
+            'message' => 'Project updated successfully.',
             'project' => $project,
         ]);
-
     }
+
 
 
     public function show(Request $request, $id)
@@ -370,11 +413,9 @@ class ProjectController extends Controller
                     $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
                 }
                 
-                \Log::info('session start date '.$session->start_date);
-                \Log::info('session end date '.$session->end_date);
                 
-                \Log::info('session start time '.$session->start_time);
-                \Log::info('session end time '.$session->end_time);
+                
+                
     
                 // Calculate session duration
                 $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
@@ -402,7 +443,11 @@ class ProjectController extends Controller
     
                 // Compute net worked time
                 $netSeconds = $sessionDuration - $adjustmentSeconds;
-               $netSeconds = $sessionDuration;
+               //$netSeconds = $sessionDuration;
+               
+               
+               
+               
     
                 if ($netSeconds > 0) {
                     $totalSeconds += $netSeconds;
@@ -419,6 +464,24 @@ class ProjectController extends Controller
                     $dateWiseTotals[$date] += $netSeconds;
                     $dateWiseAdjustments[$date] += $adjustmentSeconds;
                 }
+                
+                
+                if($session->task_id == 433){
+                    
+                       // \Log::info('session start date '.$session->start_date);
+                       // \Log::info('session end date '.$session->end_date);
+                        
+                      //  \Log::info('session start time '.$session->start_time);
+                      //  \Log::info('session end time '.$session->end_time);
+                        
+                       // \Log::info('session duration '.$sessionDuration);
+                      //  \Log::info('idle duration '.$adjustmentSeconds);
+                        
+                       // \Log::info('netSeconds '.$netSeconds);
+                        
+                     //    \Log::info('total seconds '.$totalSeconds);
+                    
+                }
     
             } catch (\Exception $e) {
                 continue;
@@ -433,6 +496,9 @@ class ProjectController extends Controller
     
            // \Log::info("[$date] Employee $employeeId - Task $taskId: Worked {$hours} hrs | Adjusted {$adjustHrs} hrs | Original {$totalWithAdj} hrs");
         }
+        
+     
+        
     
         return $totalSeconds;
     }
@@ -469,6 +535,12 @@ class ProjectController extends Controller
             'customer_id' => 'nullable|exists:users,id',
         ]);
 
+        if($project->due_date != $request->due_date){
+
+              dueChangedNotification($id, $request->due_date, $type="project_due_date_updated");
+
+        }
+
         $project->update($validated);
 
         return response()->json([
@@ -489,6 +561,8 @@ class ProjectController extends Controller
             ProjectTask::where('project_id', $request->project_id)->update(['task_status' => "Completed"]);
 
         }
+
+        statusChangedNotification($request->project_id, $request->status, $type="project_status_changed");
 
         return response()->json([
             'message' => 'Project updated successfully.',

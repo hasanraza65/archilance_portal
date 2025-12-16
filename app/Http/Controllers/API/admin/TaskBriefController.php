@@ -49,6 +49,9 @@ class TaskBriefController extends Controller
             }
         }
 
+
+        briefAddedNotification($request->task_id, "task_brief_added");
+
         return response()->json(['message' => 'Project Brief created successfully.', 'brief' => $brief]);
     }
 

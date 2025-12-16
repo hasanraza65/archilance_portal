@@ -10,6 +10,7 @@ use Auth;
 use Carbon\Carbon;
 use Carbon\CarbonInterval;
 use Illuminate\Support\Facades\DB;
+use App\Models\TrackWindow;
 
 class WorkSessionController extends Controller
 {
@@ -19,14 +20,14 @@ class WorkSessionController extends Controller
     try {
         $userId = Auth::id();
         
+      $query = WorkSession::with('screenshots', 'taskDetail', 'userDetail', 'idleTimes')
+        ->where('user_id', $userId);
+    
         // Use current date if no dates provided
         $filterStartDate = $request->start_date ?? now()->toDateString();
         $filterEndDate = $request->end_date ?? $filterStartDate;
-
-        $query = WorkSession::with('screenshots', 'taskDetail', 'userDetail', 'idleTimes')
-            ->where('user_id', $userId);
-
-        // Include sessions that either started OR ended within the date range
+        
+        // Date filters
         $query->where(function($q) use ($filterStartDate, $filterEndDate) {
             $q->whereBetween('start_date', [$filterStartDate, $filterEndDate])
               ->orWhereBetween('end_date', [$filterStartDate, $filterEndDate])
@@ -35,13 +36,21 @@ class WorkSessionController extends Controller
                      ->where('end_date', '>', $filterEndDate);
               });
         });
-
-        // Optional task_id filter
-        if ($request->has('task_id') && !empty($request->task_id)) {
+        
+        // ✅ Extra filters for task_id / project_id
+        if ($request->filled('task_id')) {
             $query->where('task_id', $request->task_id);
         }
+        
+        if ($request->filled('project_id')) {
+            $query->whereHas('taskDetail', function($q) use ($request) {
+                $q->where('project_id', $request->project_id);
+            });
+        }
 
-        $sessions = $query->orderBy('created_at', 'desc')->paginate(1000);
+
+
+        $sessions = $query->orderBy('created_at', 'desc')->paginate(100);
 
         $overallTotalSeconds = 0;
         $time_strings_hr = [];
@@ -63,9 +72,9 @@ class WorkSessionController extends Controller
             // Get all dates in the filter range
             $filterDates = [];
             $currentDate = Carbon::parse($filterStartDate);
-            $endDate = Carbon::parse($filterEndDate);
+            $endDateObj = Carbon::parse($filterEndDate);
             
-            while ($currentDate->lte($endDate)) {
+            while ($currentDate->lte($endDateObj)) {
                 $filterDates[] = $currentDate->toDateString();
                 $currentDate->addDay();
             }
@@ -152,19 +161,21 @@ class WorkSessionController extends Controller
         $remainingMinutes = $totalMinutes % 60;
         $totalTimeString = "{$totalHours}h {$remainingMinutes}m";
 
-        return response()->json([
-            'data' => $sessions->items(),
-            'meta' => [
-                'total' => $sessions->total(),
-                'per_page' => $sessions->perPage(),
-                'current_page' => $sessions->currentPage(),
-                'last_page' => $sessions->lastPage(),
-            ],
-            'overall_total_time' => $totalTimeString
-        ]);
+         $ids = $sessions->pluck('id')->toArray();
+        $windows_activity = TrackWindow::whereIn('session_id', $ids)->get();
+        
+        return response()->json(
+            array_merge(
+                $sessions->toArray(),
+                [
+                    'overall_total_time' => $totalTimeString,
+                    'windows_activity' => $windows_activity
+                ]
+            )
+        );
 
     } catch (\Exception $e) {
-        \Log::error('Employee WorkSession Error: '.$e->getMessage());
+        \Log::error('WorkSession Error: '.$e->getMessage());
         return response()->json([
             'error' => 'Server error',
             'message' => $e->getMessage()
@@ -231,11 +242,13 @@ class WorkSessionController extends Controller
         ]);
     }
 
+
+
     public function stop(Request $request)
     {
         $userId = Auth::id();
 
-        // Find the latest open session
+        // Fetch open work session
         $openSession = WorkSession::where('user_id', $userId)
             ->whereNull('end_time')
             ->latest('start_time')
@@ -247,16 +260,44 @@ class WorkSessionController extends Controller
             ], 404);
         }
 
-        // Close the session by setting end_time and end_date
+        // Determine end time
         $now = Carbon::now();
-       $openSession->end_time = $request->filled('end_time') 
-            ? Carbon::parse($request->end_time) 
+        $sessionEndTime = $request->filled('end_time')
+            ? Carbon::parse($request->end_time)
             : $now;
 
-        $openSession->end_date = $request->filled('end_date') 
-            ? Carbon::parse($request->end_date)->toDateString() 
+        $sessionEndDate = $request->filled('end_date')
+            ? Carbon::parse($request->end_date)->toDateString()
             : $now->toDateString();
 
+        // ----------------------------------------------
+        // CLOSE ANY ACTIVE TRACK WINDOW FOR THIS SESSION
+        // ----------------------------------------------
+        $openWindow = TrackWindow::where('employee_id', $userId)
+            ->where('session_id', $openSession->id)
+            ->whereNull('end_time')
+            ->latest('start_time')
+            ->first();
+
+        if ($openWindow) {
+
+            // Set end_time same as WorkSession end_time
+            $openWindow->end_time = $sessionEndTime;
+
+            // Calculate duration
+            $start = Carbon::parse($openWindow->start_time);
+            $end   = Carbon::parse($sessionEndTime);
+
+            $openWindow->duration_seconds = $start->diffInSeconds($end);
+
+            $openWindow->save();
+        }
+
+        // ----------------------------------------------
+        // CLOSE WORK SESSION
+        // ----------------------------------------------
+        $openSession->end_time = $sessionEndTime;
+        $openSession->end_date = $sessionEndDate;
         $openSession->save();
 
         return response()->json([

@@ -8,6 +8,10 @@ use App\Models\ProjectChat;
 use App\Models\ProjectChatAttachment;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use App\Models\User;
+use App\Models\Project;
+use App\Models\ProjectAssignee;
+
 
 class ProjectChatController extends Controller
 {
@@ -28,6 +32,7 @@ class ProjectChatController extends Controller
         ]);
 
         // Handle attachments
+        $attachments = [];
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
                 $path = $file->store('project_chat_attachments', 'public');
@@ -40,8 +45,95 @@ class ProjectChatController extends Controller
                     'file_size' => $file->getSize(),
                     'file_name' => $file->getClientOriginalName(),
                 ]);
+
+                // Store absolute path for email attachment
+                $attachments[] = storage_path('app/public/' . $path);
             }
         }
+
+
+        //send email 
+
+        $project = Project::find($request->project_id);
+
+        $project_assignees = ProjectAssignee::where('project_id',$request->project_id)->get();
+
+        $admins = User::where('user_role',2)->get();
+
+        foreach($project_assignees as $assignee){
+
+            if($assignee->employee_id != Auth::user()->id){
+                
+                $receiver = User::find($assignee->employee_id);
+           
+                $receiver_email = $receiver->email;
+                $receiver_name = $receiver->name;
+                $sender_name = Auth::user()->name;
+                $message_text = $request->message;
+                $project_title = $project->project_name;
+                $project_id = $project->id;
+
+                \Mail::send(
+                    'mails.new-project-message',
+                    compact(['message_text', 'project_title', 'project_id']),
+                    function ($message) use ($receiver_email, $receiver_name, $sender_name, $attachments) {
+                        $message
+                            ->from("info@archilance.net", $sender_name)
+                            ->to($receiver_email)
+                            ->subject($sender_name . ' messaged you - Archilance LLC');
+
+                        // Attach uploaded files
+                        foreach ($attachments as $filePath) {
+                            if (file_exists($filePath)) {
+                                $message->attach($filePath);
+                            }
+                        }
+                    }
+                );
+
+            }
+
+        }
+
+
+        foreach($admins as $assignee){
+
+            if($assignee->id != Auth::user()->id){
+
+                $receiver = User::find($assignee->id);
+           
+                $receiver_email = $receiver->email;
+                $receiver_name = $receiver->name;
+                $sender_name = Auth::user()->name;
+                $message_text = $request->message;
+                $project_title = $project->project_name;
+                $project_id = $project->id;
+
+                \Mail::send(
+                    'mails.new-project-message',
+                    compact(['message_text', 'project_title', 'project_id']),
+                    function ($message) use ($receiver_email, $receiver_name, $sender_name, $attachments) {
+                        $message
+                            ->from("info@archilance.net", $sender_name)
+                            ->to($receiver_email)
+                            ->subject($sender_name . ' messaged you - Archilance LLC');
+
+                        // Attach uploaded files
+                        foreach ($attachments as $filePath) {
+                            if (file_exists($filePath)) {
+                                $message->attach($filePath);
+                            }
+                        }
+                    }
+                );
+
+            }
+
+        }
+
+
+
+        //ending send email
 
         return response()->json([
             'message' => 'Message sent successfully.',

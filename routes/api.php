@@ -24,6 +24,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
+    Route::get('/my-notifications', [AuthController::class, 'myNotifications']);
+
+    Route::post('/update-notification-read-status', [AuthController::class, 'updateReadStatusNotifications']);
+
     Route::post('/update-profile', [ProfileManagementController::class, 'updateProfile']);
     Route::post('/update-password', [ProfileManagementController::class, 'updatePassword']);
     Route::post('/update-profile-pic', [ProfileManagementController::class, 'updateProfilePic']);
@@ -62,6 +66,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //work session 
         Route::resource('/work-session', WorkSessionController::class);
+        Route::post('/other-manual-time', [WorkSessionController::class, 'manualSession']);
         //ending work session
 
         Route::resource('/project-chat', App\Http\Controllers\API\admin\ProjectChatController::class);
@@ -122,6 +127,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //work session 
         Route::resource('/work-session', WorkSessionController::class);
+        Route::post('/other-manual-time', [WorkSessionController::class, 'manualSession']);
         //ending work session
 
         Route::resource('/project-chat', App\Http\Controllers\API\admin\ProjectChatController::class);
@@ -183,6 +189,7 @@ Route::middleware('auth:sanctum')->group(function () {
         
         Route::resource('/screenshot', App\Http\Controllers\API\employee\ScreenshotController::class);
         Route::post('/manual-time', [App\Http\Controllers\API\employee\WorkSessionController::class, 'manualSession']);
+        Route::post('/other-manual-time', [WorkSessionController::class, 'manualSession']);
         Route::post('/stop-session', [App\Http\Controllers\API\employee\WorkSessionController::class, 'stop']);
 
         Route::post('/update-idle-time', [App\Http\Controllers\API\employee\ScreenshotController::class, 'upsertIdleTime']);
@@ -223,6 +230,9 @@ Route::middleware('auth:sanctum')->group(function () {
         
         
         Route::get('/projects-with-members', [ProjectController::class, 'projectsWithMember']);
+        
+        
+        Route::resource('/track-window', App\Http\Controllers\API\employee\TrackWindowController::class);
 
     });
 

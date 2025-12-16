@@ -49,6 +49,9 @@ class ProjectBriefController extends Controller
             }
         }
 
+
+        briefAddedNotification($request->project_id, "project_brief_added");
+
         return response()->json(['message' => 'Project Brief created successfully.', 'brief' => $brief]);
     }
 

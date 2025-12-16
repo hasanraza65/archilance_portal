@@ -6,6 +6,9 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\LeaveRequest;
 use Illuminate\Support\Facades\Auth;
+use Carbon\Carbon;
+use Carbon\CarbonInterface;
+
 
 class LeaveRequestController extends Controller
 {
@@ -35,35 +38,77 @@ class LeaveRequestController extends Controller
     public function show($id)
     {
         $leave = LeaveRequest::with('user')->findOrFail($id);
-    
         $userId = $leave->user_id;
-    
+
         // Determine current leave cycle (1 July → 30 June)
         $today = now();
         if ($today->month >= 7) {
-            // Current cycle: July 1 of this year → June 30 of next year
-            $cycleStart = $today->copy()->startOfYear()->addMonths(6)->startOfMonth(); // 1 July
-            $cycleEnd   = $today->copy()->addYear()->startOfYear()->addMonths(6)->subDay(); // 30 June
+            $cycleStart = $today->copy()->startOfYear()->addMonths(6)->startOfMonth(); // July 1
+            $cycleEnd   = $today->copy()->addYear()->startOfYear()->addMonths(6)->subDay(); // June 30 next year
         } else {
-            // Current cycle: July 1 of last year → June 30 of this year
-            $cycleStart = $today->copy()->subYear()->startOfYear()->addMonths(6)->startOfMonth(); // 1 July last year
-            $cycleEnd   = $today->copy()->startOfYear()->addMonths(6)->subDay(); // 30 June this year
+            $cycleStart = $today->copy()->subYear()->startOfYear()->addMonths(6)->startOfMonth(); // July 1 last year
+            $cycleEnd   = $today->copy()->startOfYear()->addMonths(6)->subDay(); // June 30 this year
         }
-    
-        // Count leaves per type for this user (excluding rejected, within cycle)
-        $leaveCounts = LeaveRequest::where('user_id', $userId)
+
+        // Get relevant leave requests for this user
+        $leaveRequests = LeaveRequest::where('user_id', $userId)
             ->where('status', '!=', 'Rejected')
-            ->whereBetween('start_date', [$cycleStart, $cycleEnd]) // assuming you have start_date column
-            ->selectRaw("leave_type, COUNT(*) as total")
-            ->groupBy('leave_type')
-            ->pluck('total', 'leave_type');
-    
-        $leaveSummary = [
-            'casual' => $leaveCounts['casual'] ?? 0,
-            'annual' => $leaveCounts['annual'] ?? 0,
-            'sick'   => $leaveCounts['sick'] ?? 0,
-        ];
-    
+            ->whereBetween('start_date', [$cycleStart, $cycleEnd])
+            ->get();
+
+        // Prepare summary array
+      $leaveSummary = [
+    'sick'   => 0,
+    'casual' => 0,
+    'annual' => 0,
+    'other'  => 0,
+];
+
+foreach ($leaveRequests as $req) {
+
+    $start = Carbon::parse($req->start_date);
+    $end   = Carbon::parse($req->end_date);
+
+    $days = 0;
+
+    while ($start->lte($end)) {
+        if (!in_array($start->dayOfWeek, [
+            CarbonInterface::SATURDAY,
+            CarbonInterface::SUNDAY
+        ])) {
+            $days++;
+        }
+        $start->addDay();
+    }
+
+    // Normalize the type (case-insensitive)
+    $type = strtolower(trim($req->leave_type));
+
+    // Map types to your fixed labels
+    switch ($type) {
+        case 'sick':
+        case 'medical leave':     // ← added
+            $mapped = 'sick';
+            break;
+
+        case 'casual':
+            $mapped = 'casual';
+            break;
+
+        case 'annual':
+            $mapped = 'annual';
+            break;
+
+        default:
+            $mapped = 'casual'; // Any other type becomes casual
+            break;
+    }
+
+    // Add the days
+    $leaveSummary[$mapped] += $days;
+}
+
+
         return response()->json([
             'data' => $leave,
             'leave_summary' => $leaveSummary,
@@ -73,6 +118,7 @@ class LeaveRequestController extends Controller
             ]
         ]);
     }
+
 
 
 

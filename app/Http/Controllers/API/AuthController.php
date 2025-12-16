@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use App\Models\User;
+use App\Models\Notification;
 use Illuminate\Support\Facades\Validator;
 use Auth;
 
@@ -143,5 +144,29 @@ class AuthController extends Controller
             'message' => 'Token updated successfully.',
             'user' => $user,
         ]);
+    }
+
+
+    public function myNotifications(){
+
+        $notifications = Notification::where('user_id',Auth::user()->id)->orderBy('id','desc')->paginate(10);
+
+        $count_unread = Notification::where('user_id',Auth::user()->id)->where('is_read',0)->count('id');
+
+        return response()->json([
+            "notifications"=>$notifications,
+            "total_unread" => $count_unread
+        ]);
+
+    }
+
+    public function updateReadStatusNotifications(){
+
+        Notification::where('user_id',Auth::user()->id)->update(["is_read"=>1]);
+
+        return response()->json([
+            'message' => 'Read status updated successfully.',
+        ]);
+
     }
 }

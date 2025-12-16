@@ -10,6 +10,7 @@ use App\Models\ChatReaction;
 use App\Models\ChatReadStatus;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use App\Models\User;
 
 class ChatController extends Controller
 {
@@ -44,6 +45,31 @@ class ChatController extends Controller
                 ]);
             }
         }
+        
+        
+         //send email 
+
+        $receiver = User::find($request->receiver_id);
+
+        $receiver_email = $receiver->email;
+        $receiver_name = $receiver->name;
+        $sender_name = Auth::user()->name;
+        $message_text = $request->message;
+
+        \Mail::send(
+            'mails.new-message',
+            compact(['message_text']),
+            function ($message) use ($receiver_email, $receiver_name, $sender_name) {
+
+
+                $message
+                    ->from("info@archilance.net", $sender_name)
+                    ->to($receiver_email)
+                    ->subject($sender_name.' messaged you - Archilance LLC');  // Attach the PDF file
+            }
+        );
+
+        //ending send email
 
         return response()->json(['message' => 'Message sent.', 'chat' => $chat->load('attachments')]);
     }

@@ -12,6 +12,7 @@ use Auth;
 use App\Models\WorkSession;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use App\Models\User;
 
 class ProjectController extends Controller
 {
@@ -33,9 +34,12 @@ class ProjectController extends Controller
         if (($user->employee_type == "Manager" || $user->employee_type == "Supervisor" || $user->employee_type == "Executive") 
             && !$request->boolean('assigned_me')) {
             
-            $projects = Project::latest()
-                ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
-                ->get();
+             $projects = Project::latest()
+            ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+            ->when($request->customer_id, function ($query) use ($request) {
+                $query->where('customer_id', $request->customer_id);
+            })
+            ->get();
         } 
         else {
             // ✅ Default employee logic (and Manager with assigned_me=1)
@@ -58,6 +62,9 @@ class ProjectController extends Controller
             $projects = Project::latest()
                 ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
                 ->whereIn('id', $all_project_ids)
+                ->when($request->customer_id, function ($query) use ($request) {
+                        $query->where('customer_id', $request->customer_id);
+                    })
                 ->get();
         }
     
@@ -256,6 +263,20 @@ class ProjectController extends Controller
             $proj_assignee->employee_id = $request->employee_ids[$i];
             $proj_assignee->project_id = $project->id;
             $proj_assignee->save();
+
+
+            $user = User::find($request->employee_ids[$i]);
+             $projectId = $project->id;
+
+            if($user){
+
+                $project_detail = Project::find($projectId);
+                $from_user = User::find(\Auth::user()->id);
+                $nature = "primary";
+                $message = $from_user->name . " has assigned you a job " . $project_detail->project_name;
+
+                insertNotificationWithNature($user->id, \Auth::user()->id, "project_assigned", $message, $nature, $projectId);
+            }
 
         }
 
@@ -486,6 +507,12 @@ class ProjectController extends Controller
             'status' => 'in:In Progress,Pending,Completed,Cancelled',
             'customer_id' => 'nullable|exists:users,id',
         ]);
+
+        if($project->due_date != $request->due_date){
+
+              dueChangedNotification($id, $request->due_date, $type="project_due_date_updated");
+
+        }
 
         $project->update($validated);
 

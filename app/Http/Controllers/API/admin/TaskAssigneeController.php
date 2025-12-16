@@ -156,6 +156,20 @@ class TaskAssigneeController extends Controller
             FirebaseHelper::sendFcmNotification($user->fcm_token, "New Task", "A task/project was assigned.");
             
         }
+
+
+      //  $user = User::find($request->employee_ids[$i]);
+             $projectId = $taskId;
+
+            if($user){
+
+                $project_detail = ProjectTask::find($projectId);
+                $from_user = User::find(\Auth::user()->id);
+                $nature = "primary";
+                $message = $from_user->name . " has assigned you a project " . $project_detail->task_title;
+
+                insertNotificationWithNature($user->id, \Auth::user()->id, "task_assigned", $message, $nature, $projectId);
+            }
     }
 
     return response()->json([

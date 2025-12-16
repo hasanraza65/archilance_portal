@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use App\Models\Screenshot;
 use App\Models\User;
 use App\Models\WorkSession;
+use App\Models\TrackWindow;
 use Auth;
 use Carbon\Carbon;
 use Carbon\CarbonInterval;
@@ -169,16 +170,23 @@ class WorkSessionController extends Controller
         $totalHours = floor($totalMinutes / 60);
         $remainingMinutes = $totalMinutes % 60;
         $totalTimeString = "{$totalHours}h {$remainingMinutes}m";
-
+        
+         $ids = $sessions->pluck('id')->toArray();
+        $windows_activity = TrackWindow::whereIn('session_id', $ids)->get();
+        
         return response()->json(
             array_merge(
                 $sessions->toArray(),
-                ['overall_total_time' => $totalTimeString]
+                [
+                    'overall_total_time' => $totalTimeString,
+                    'windows_activity' => $windows_activity
+                ]
             )
         );
-
+        
+        
     } catch (\Exception $e) {
-        \Log::error('WorkSession Error: '.$e->getMessage());
+       // \Log::error('WorkSession Error: '.$e->getMessage());
         return response()->json([
             'error' => 'Server error',
             'message' => $e->getMessage()
@@ -267,7 +275,7 @@ class WorkSessionController extends Controller
     {
 
         $data = new WorkSession();
-        $data->user_id = Auth::user()->id;
+        $data->user_id = $request->user_id;
         $data->start_date = $request->start_date;
         $data->start_time = $request->start_time;
         $data->end_date = $request->end_date;

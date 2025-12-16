@@ -59,10 +59,20 @@ class ProjectTaskController extends Controller
 
 
         if ($request->task_status == "Backlog") {
+            // Update project status
             $project_data = Project::find($request->project_id);
             if ($project_data) {
                 $project_data->status = "Backlog";
                 $project_data->update();
+            }
+
+            // ✅ Also update parent task status if subtask belongs to a parent
+            if (!empty($request->parent_task_id)) {
+                $parentTask = ProjectTask::find($request->parent_task_id);
+                if ($parentTask) {
+                    $parentTask->task_status = "Backlog";
+                    $parentTask->update();
+                }
             }
         }
 
@@ -244,6 +254,8 @@ class ProjectTaskController extends Controller
     {
         $task = ProjectTask::findOrFail($id);
 
+        $task_status_changed = 0;
+
         $request->validate([
             'task_title' => 'sometimes|required|string|max:255',
             'task_status' => 'nullable|string',
@@ -251,6 +263,16 @@ class ProjectTaskController extends Controller
             'due_date' => 'nullable|date',
             'attachments.*' => 'nullable|file|max:10240',
         ]);
+
+        if($task->due_date != $request->due_date){
+
+              dueChangedNotification($id, $request->due_date, $type="task_due_date_updated");
+
+        }
+
+        if ($task->task_status != $request->task_status) {
+            $task_status_changed = 1;
+        }
 
         $task->update($request->only([
             'task_title',
@@ -289,6 +311,13 @@ class ProjectTaskController extends Controller
 
         // ✅ NEW: Update parent Project (Job) Status based on all child tasks
         $this->updateParentProjectStatus($task->project_id);
+
+
+        if ($task_status_changed == 1) {
+            statusChangedNotification($id, $request->task_status, $type = "task_status_changed");
+        }
+
+
 
         return response()->json([
             'message' => 'Task updated successfully.',
