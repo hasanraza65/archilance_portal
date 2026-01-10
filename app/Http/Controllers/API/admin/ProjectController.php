@@ -309,7 +309,8 @@ class ProjectController extends Controller
             'tasks.assignees.user',
             'tasks.attachments',
             'allBriefs',
-            'allBriefs.attachments'
+            'allBriefs.attachments',
+            'allNotes'
         ])->findOrFail($id);
 
         $taskHours = [];

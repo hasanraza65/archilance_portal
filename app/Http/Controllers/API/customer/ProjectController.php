@@ -71,7 +71,7 @@ class ProjectController extends Controller
             'subTasks.assignees',
             'subTasks.assignees.user',
             'subTasks.creator',
-            'subTasks.attachments'
+            'subTasks.attachments',
         ])
             ->whereNull('parent_task_id') // Only main tasks
             ->whereHas('project', function ($q) use ($customerIds) {
@@ -111,7 +111,7 @@ class ProjectController extends Controller
 
 
 
-    public function show(Request $request, $id)
+     public function show(Request $request, $id)
     {
         $project = Project::with([
             'projectAssignees',
@@ -124,7 +124,8 @@ class ProjectController extends Controller
             'tasks.assignees.user',
             'tasks.attachments',
             'allBriefs',
-            'allBriefs.attachments'
+            'allBriefs.attachments',
+            'allNotes'
         ])->findOrFail($id);
 
         $taskHours = [];
@@ -182,7 +183,6 @@ class ProjectController extends Controller
     private function calculateEmployeeTaskHours($employeeId=null, $taskId, $startDateFilter = null, $endDateFilter = null)
     {
         
-        
         $sessionsQuery = WorkSession::where('task_id', $taskId);
 
     
@@ -210,7 +210,7 @@ class ProjectController extends Controller
     
         $sessions = $sessionsQuery->get();
         
-      //  \Log::info($sessions);
+       // \Log::info($sessions);
     
         $totalSeconds = 0;
         $dateWiseTotals = [];
@@ -228,6 +228,10 @@ class ProjectController extends Controller
                     $endDate = $session->end_date ?? $session->start_date;
                     $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
                 }
+                
+                
+                
+                
     
                 // Calculate session duration
                 $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
@@ -255,7 +259,11 @@ class ProjectController extends Controller
     
                 // Compute net worked time
                 $netSeconds = $sessionDuration - $adjustmentSeconds;
-               $netSeconds = $sessionDuration;
+               //$netSeconds = $sessionDuration;
+               
+               
+               
+               
     
                 if ($netSeconds > 0) {
                     $totalSeconds += $netSeconds;
@@ -272,6 +280,24 @@ class ProjectController extends Controller
                     $dateWiseTotals[$date] += $netSeconds;
                     $dateWiseAdjustments[$date] += $adjustmentSeconds;
                 }
+                
+                
+                if($session->task_id == 433){
+                    
+                       // \Log::info('session start date '.$session->start_date);
+                       // \Log::info('session end date '.$session->end_date);
+                        
+                      //  \Log::info('session start time '.$session->start_time);
+                      //  \Log::info('session end time '.$session->end_time);
+                        
+                       // \Log::info('session duration '.$sessionDuration);
+                      //  \Log::info('idle duration '.$adjustmentSeconds);
+                        
+                       // \Log::info('netSeconds '.$netSeconds);
+                        
+                     //    \Log::info('total seconds '.$totalSeconds);
+                    
+                }
     
             } catch (\Exception $e) {
                 continue;
@@ -286,6 +312,9 @@ class ProjectController extends Controller
     
            // \Log::info("[$date] Employee $employeeId - Task $taskId: Worked {$hours} hrs | Adjusted {$adjustHrs} hrs | Original {$totalWithAdj} hrs");
         }
+        
+     
+        
     
         return $totalSeconds;
     }

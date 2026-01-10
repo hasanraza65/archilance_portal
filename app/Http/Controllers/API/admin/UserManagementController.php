@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use Illuminate\Validation\Rule;
+use App\Models\WorkSession;
 
 
 class UserManagementController extends Controller
@@ -35,7 +36,34 @@ class UserManagementController extends Controller
     public function index(Request $request)
     {
         $roleId = $this->getRoleFromRequest($request);
-        $users = User::where('user_role', $roleId)->get();
+
+        $users = User::where('user_role', $roleId)
+            ->when($roleId === 3, function ($query) {
+                // Only for employee-user
+                $query->with(['workSessions' => function ($q) {
+                    $q->latest('id')->limit(1);
+                }]);
+            })
+            ->get()
+            ->map(function ($user) use ($roleId) {
+
+                if ($roleId === 3) {
+                    $session = $user->workSessions->first();
+
+                    if ($session && is_null($session->end_date) && is_null($session->end_time)) {
+                        $user->timer_status = 'Online';
+                        $user->start_datetime = $session->start_date . ' ' . $session->start_time;
+                    } else {
+                        $user->timer_status = 'Offline';
+                        $user->start_datetime = null;
+                    }
+
+                    unset($user->workSessions); // clean response
+                }
+
+                return $user;
+            });
+
         return response()->json($users);
     }
 

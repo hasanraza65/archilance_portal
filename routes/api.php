@@ -16,9 +16,14 @@ use App\Http\Controllers\API\admin\ProjectBriefController;
 use App\Http\Controllers\API\admin\WorkSessionController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\SubscriptionController;
+use App\Http\Controllers\API\SlackController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [AuthController::class, 'register']);
+
+Route::post('/slack/interactions', [SlackController::class, 'handle']);
+
+
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
@@ -48,6 +53,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::resource('task-assignee', TaskAssigneeController::class);
         Route::post('/bulk-assign', [TaskAssigneeController::class, 'bulkAssign']);
         Route::resource('task-comment', TaskCommentController::class);
+        Route::get('/task-comment-with-customers', [App\Http\Controllers\API\admin\TaskCommentController::class, 'indexWithCustomer']);
         Route::post('/mark-comments-read', [TaskCommentController::class, 'markAllAsRead']);
         Route::post('/mark-reply-comments-read', [TaskCommentController::class, 'markAllRepliesAsRead']);
         Route::post('/change-project-task-order', [ProjectTaskController::class, 'changeOrder']);
@@ -70,6 +76,8 @@ Route::middleware('auth:sanctum')->group(function () {
         //ending work session
 
         Route::resource('/project-chat', App\Http\Controllers\API\admin\ProjectChatController::class);
+
+        Route::get('/project-chat-with-customers/{id}', [App\Http\Controllers\API\admin\ProjectChatController::class, 'showWithCustomer']);
 
         //leaves 
         Route::resource('/leave-request', App\Http\Controllers\API\admin\LeaveRequestController::class);
@@ -96,6 +104,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/delete-idle-time', [App\Http\Controllers\API\employee\ScreenshotController::class, 'deleteIdleTime']);
 
 
+        //working hours
+        Route::resource('/working-hours', App\Http\Controllers\API\admin\WorkingHourController::class);
+
+         //checklist notes
+        Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+        Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+
+
     });
 
 
@@ -109,6 +125,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::resource('task-assignee', TaskAssigneeController::class);
         Route::post('/bulk-assign', [TaskAssigneeController::class, 'bulkAssign']);
         Route::resource('task-comment', TaskCommentController::class);
+        Route::get('/task-comment-with-customers', [App\Http\Controllers\API\admin\TaskCommentController::class, 'indexWithCustomer']);
+
         Route::post('/mark-comments-read', [TaskCommentController::class, 'markAllAsRead']);
         Route::post('/mark-reply-comments-read', [TaskCommentController::class, 'markAllRepliesAsRead']);
         Route::post('/change-project-task-order', [ProjectTaskController::class, 'changeOrder']);
@@ -154,6 +172,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/projects-with-members', [ProjectController::class, 'projectsWithMember']);
 
 
+         //checklist notes
+        Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+        Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+
+
     });
 
 
@@ -171,6 +194,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::resource('/task-assignee', App\Http\Controllers\API\employee\TaskAssigneeController::class);
         Route::post('/bulk-assign', [App\Http\Controllers\API\employee\TaskAssigneeController::class, 'bulkAssign']);
         Route::resource('/task-comment', App\Http\Controllers\API\employee\TaskCommentController::class);
+        Route::get('/task-comment-with-customers', [App\Http\Controllers\API\employee\TaskCommentController::class, 'indexWithCustomer']);
+
         Route::post('/mark-comments-read', [App\Http\Controllers\API\employee\TaskCommentController::class, 'markAllAsRead']);
         Route::post('/mark-reply-comments-read', [App\Http\Controllers\API\employee\TaskCommentController::class, 'markAllRepliesAsRead']);
         Route::post('/change-project-task-order', [App\Http\Controllers\API\employee\ProjectTaskController::class, 'changeOrder']);
@@ -197,8 +222,13 @@ Route::middleware('auth:sanctum')->group(function () {
         //leaves 
         Route::resource('/leave-request', App\Http\Controllers\API\employee\LeaveRequestController::class);
 
+        //other leaves 
+        Route::resource('/other-leave-request', App\Http\Controllers\API\admin\LeaveRequestController::class);
+
         //project chats
         Route::resource('/project-chat', App\Http\Controllers\API\employee\ProjectChatController::class);
+
+        Route::get('/project-chat-with-customers/{id}', [App\Http\Controllers\API\employee\ProjectChatController::class, 'showWithCustomer']);
         
         
         Route::post('/update-project-status', [App\Http\Controllers\API\admin\ProjectController::class, 'updateStatus']);
@@ -216,6 +246,9 @@ Route::middleware('auth:sanctum')->group(function () {
     
             //customer team
            // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
+
+
+
         });
 
 
@@ -234,6 +267,16 @@ Route::middleware('auth:sanctum')->group(function () {
         
         Route::resource('/track-window', App\Http\Controllers\API\employee\TrackWindowController::class);
 
+         //working hours
+        Route::resource('/working-hours', App\Http\Controllers\API\admin\WorkingHourController::class);
+        
+        
+        
+          //checklist notes
+        Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+
+        Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+
     });
 
 
@@ -241,6 +284,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
         Route::resource('/project-chat', App\Http\Controllers\API\customer\ProjectChatController::class);
+
         Route::resource('/project', App\Http\Controllers\API\customer\ProjectController::class);
         
         Route::get('/projects-with-tasks', [App\Http\Controllers\API\customer\ProjectController::class, 'projectsWithTasks']);
@@ -282,6 +326,13 @@ Route::middleware('auth:sanctum')->group(function () {
         
         Route::resource('/task-comment', App\Http\Controllers\API\employee\TaskCommentController::class);
 
+        Route::get('/task-comment-with-customers', [App\Http\Controllers\API\employee\TaskCommentController::class, 'indexWithCustomer']);
+
+
+         //checklist notes
+        Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+
     });
 
 
@@ -299,6 +350,11 @@ Route::middleware('auth:sanctum')->group(function () {
         //customer team
         Route::resource('/customer-team', App\Http\Controllers\API\customerteam\CustomerTeamController::class);
         Route::post('/update-team-status', [App\Http\Controllers\API\customerteam\CustomerTeamController::class, 'updateTeamStatus']);
+
+
+         //checklist notes
+        Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
 
     });

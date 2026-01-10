@@ -11,6 +11,7 @@ use Carbon\Carbon;
 use Carbon\CarbonInterval;
 use Illuminate\Support\Facades\DB;
 use App\Models\TrackWindow;
+use App\Models\WorkingHour;
 
 class WorkSessionController extends Controller
 {
@@ -192,55 +193,76 @@ class WorkSessionController extends Controller
         return response()->json($data);
     }
 
-     public function store(Request $request)
-    {
-        $userId = Auth::id();
+   public function store(Request $request)
+{
+    $userId = Auth::id();
     
-        // 1. Check if any open session exists for this user
-        $openSession = WorkSession::where('user_id', $userId)
-            ->whereNull('end_time')
-            ->latest('start_time')
-            ->first();
+    $my_working_hours = WorkingHour::where('employee_id', $userId)->get();
     
-        // 2. Close the previous open session (if exists)
-        if ($openSession) {
-            // Find the last screenshot for this session
-            $lastScreenshot = Screenshot::where('session_id', $openSession->id)
-                ->latest('created_at')
-                ->first();
-    
-            if ($lastScreenshot) {
-                // Use last screenshot timestamp directly
-                $adjustedTime = Carbon::parse($lastScreenshot->created_at);
-            
-                $openSession->end_time = $adjustedTime;
-                $openSession->end_date = $adjustedTime->toDateString();
-            } else {
-                // Fallback: no screenshot found, close with current time
-                $openSession->end_time = Carbon::now();
-                $openSession->end_date = Carbon::now()->toDateString();
-            }
+    $now = Carbon::now();
 
-    
-            $openSession->save();
+    // 1. Check if current time falls within any of the user's working hours
+    if ($my_working_hours->count() > 0) {
+        $withinWorkingHours = false;
+        foreach ($my_working_hours as $slot) {
+            $start = Carbon::parse($slot->start_time);
+            $end = Carbon::parse($slot->end_time);
+
+            // Check if current time is within this slot
+            if ($now->between($start, $end)) {
+                $withinWorkingHours = true;
+                break;
+            }
         }
-    
-        $now = Carbon::now();
-    
-        // 3. Start a new session
-        $newSession = new WorkSession();
-        $newSession->user_id = $userId;
-        $newSession->task_id = $request->task_id;
-        $newSession->memo_content = $request->memo_content;
-        $newSession->start_time = $now;
-        $newSession->start_date = $now->toDateString();
-        $newSession->save();
-    
-        return response()->json([
-            'message' => 'Work session started successfully. Previous session closed if it was open.',
-            'work_session' => $newSession
-        ]);
+
+        if (!$withinWorkingHours) {
+            return response()->json([
+                'error' => 'You cannot start a work session outside your working hours.',
+                'error_code' => "working_hours_restriction"
+            ], 404);
+        }
     }
+    // If no working hours defined, allow starting anytime
+
+    // 2. Check if any open session exists for this user
+    $openSession = WorkSession::where('user_id', $userId)
+        ->whereNull('end_time')
+        ->latest('start_time')
+        ->first();
+
+    // 3. Close the previous open session (if exists)
+    if ($openSession) {
+        $lastScreenshot = Screenshot::where('session_id', $openSession->id)
+            ->latest('created_at')
+            ->first();
+
+        if ($lastScreenshot) {
+            $adjustedTime = Carbon::parse($lastScreenshot->created_at);
+            $openSession->end_time = $adjustedTime;
+            $openSession->end_date = $adjustedTime->toDateString();
+        } else {
+            $openSession->end_time = Carbon::now();
+            $openSession->end_date = Carbon::now()->toDateString();
+        }
+
+        $openSession->save();
+    }
+
+    // 4. Start a new session
+    $newSession = new WorkSession();
+    $newSession->user_id = $userId;
+    $newSession->task_id = $request->task_id;
+    $newSession->memo_content = $request->memo_content;
+    $newSession->start_time = $now;
+    $newSession->start_date = $now->toDateString();
+    $newSession->save();
+
+    return response()->json([
+        'message' => 'Work session started successfully. Previous session closed if it was open.',
+        'work_session' => $newSession
+    ]);
+}
+
 
 
 

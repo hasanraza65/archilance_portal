@@ -113,7 +113,8 @@ class ProjectTaskController extends Controller
             'subTasks.creator',
             'attachments',
             'allBriefs',
-            'allBriefs.attachments'
+            'allBriefs.attachments',
+            'allNotes'
         ])->findOrFail($id);
 
         // Calculate working hours for each assignee

@@ -29,10 +29,18 @@ return [
     ],
 
     'slack' => [
+        // Existing notification config (keep it)
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
+
+        // ✅ ADD THIS for Slack → Laravel
+        'signing_secret' => env('SLACK_SIGNING_SECRET'),
+
+        // Optional (if you call Slack APIs later)
+        'bot_token' => env('SLACK_BOT_TOKEN'),
     ],
+
 
 ];

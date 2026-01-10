@@ -27,7 +27,41 @@ class TaskCommentController extends Controller
         }
     
         // 1. Order by latest first
-        $comments = $query->with(['commentAttachments','replies','replies.sender'])->orderBy('created_at', 'desc')->paginate(10);
+        $comments = $query->with(['commentAttachments','replies','replies.sender'])
+        ->where('allowed_customer',0)
+        ->orderBy('created_at', 'desc')
+        ->paginate(10);
+    
+        // 2. Add custom field
+        $comments->getCollection()->transform(function ($comment) use ($userId) {
+            $comment->is_read = $comment->isReadBy($userId);
+            return $comment;
+        });
+    
+        // 3. Reverse items so messages go oldest -> newest within this page
+        $comments->setCollection($comments->getCollection()->reverse()->values());
+    
+        return response()->json($comments);
+    }
+
+
+    public function indexWithCustomer(Request $request)
+    {
+        $userId = Auth::id();
+    
+        $query = TaskComment::with(['sender'])
+            ->withCount('replies');
+    
+        if ($request->has('task_id')) {
+            $query->where('task_id', $request->task_id)
+                ->whereNull('reply_to');
+        }
+    
+        // 1. Order by latest first
+        $comments = $query->with(['commentAttachments','replies','replies.sender'])
+        ->where('allowed_customer',1)
+        ->orderBy('created_at', 'desc')
+        ->paginate(10);
     
         // 2. Add custom field
         $comments->getCollection()->transform(function ($comment) use ($userId) {
@@ -56,6 +90,7 @@ class TaskCommentController extends Controller
             'comment_message' => $request->comment_message,
             'sender_id'       => Auth::id(),
             'reply_to'        => $request->reply_to,
+            'allowed_customer' => $request->allowed_customer ?? 0
         ]);
 
         // Handle file uploads

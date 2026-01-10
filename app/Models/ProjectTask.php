@@ -47,4 +47,10 @@ class ProjectTask extends Model
     {
         return $this->hasMany(TaskBrief::class, 'task_id');
     }
+
+    public function allNotes()
+    {
+        return $this->hasMany(Note::class, 'project_id')
+                    ->where('type', 'task');
+    }
 }

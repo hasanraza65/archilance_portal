@@ -29,6 +29,7 @@ class ProjectChatController extends Controller
             'sender_id'  => Auth::id(),
             'is_admin'   => true, // Admin message
             'message'    => $request->message,
+            'allowed_customer' => $request->allowed_customer ?? 0
         ]);
 
         // Handle attachments
@@ -198,11 +199,24 @@ class ProjectChatController extends Controller
     {
         $chats = ProjectChat::where('project_id', $projectId)
             ->with(['attachments','sender'])
+            ->where('allowed_customer',0)
             ->orderBy('created_at', 'asc')
             ->get();
 
         return response()->json(['chats' => $chats]);
     }
+    
+    public function showWithCustomer($projectId)
+    {
+        $chats = ProjectChat::where('project_id', $projectId)
+            ->with(['attachments','sender'])
+            ->where('allowed_customer',1)
+            ->orderBy('created_at', 'asc')
+            ->get();
+
+        return response()->json(['chats' => $chats]);
+    }
+
 
     // Delete message
     public function destroy($id)

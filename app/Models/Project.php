@@ -33,4 +33,10 @@ class Project extends Model
     {
         return $this->hasMany(ProjectAssignee::class, 'project_id');
     }
+
+    public function allNotes()
+    {
+        return $this->hasMany(Note::class, 'project_id')
+                    ->where('type', 'project');
+    }
 }
