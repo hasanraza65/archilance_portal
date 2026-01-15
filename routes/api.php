@@ -17,11 +17,15 @@ use App\Http\Controllers\API\admin\WorkSessionController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\SubscriptionController;
 use App\Http\Controllers\API\SlackController;
+use App\Http\Controllers\OneDriveAuthController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [AuthController::class, 'register']);
 
 Route::post('/slack/interactions', [SlackController::class, 'handle']);
+
+Route::get('/auth/onedrive', [OneDriveAuthController::class, 'redirect']);
+Route::get('/auth/onedrive/callback', [OneDriveAuthController::class, 'callback']);
 
 
 
@@ -248,6 +252,9 @@ Route::middleware('auth:sanctum')->group(function () {
            // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
 
 
+        Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
+
+
 
         });
 
@@ -259,6 +266,12 @@ Route::middleware('auth:sanctum')->group(function () {
     
             //customer team
            // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
+
+           Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
+        });
+
+        Route::middleware('employeeType:Executive')->group(function () {
+            Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
         });
         
         
@@ -276,6 +289,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
 
         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+
+        Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
 
     });
 

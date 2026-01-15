@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Mail;
+use App\Services\OneDriveService;
 
 Route::get('/', function () {
     return view('welcome');
@@ -37,6 +38,41 @@ Route::get('/test-email', function () {
         return '<h3>❌ Error sending email:</h3><pre>' . $e->getMessage() . '</pre>';
     }
 });
+
+
+
+Route::get('/onedrive-image', function (Request $request) {
+
+    $path = $request->query('path');
+
+    if (!$path) {
+        return response('File path required', 400);
+    }
+
+    try {
+        $service = app(OneDriveService::class);
+
+        $contents = $service->streamFile($path);
+
+        // Guess MIME type from extension
+        $ext = pathinfo($path, PATHINFO_EXTENSION);
+        $mime = match(strtolower($ext)) {
+            'png' => 'image/png',
+            'jpg', 'jpeg' => 'image/jpeg',
+            'gif' => 'image/gif',
+            default => 'application/octet-stream',
+        };
+
+        return response($contents)
+            ->header('Content-Type', $mime);
+
+    } catch (\Exception $e) {
+        return response("Failed to fetch file: " . $e->getMessage(), 500);
+    }
+
+});
+
+
 
 
 

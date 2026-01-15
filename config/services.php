@@ -42,5 +42,11 @@ return [
         'bot_token' => env('SLACK_BOT_TOKEN'),
     ],
 
+    'onedrive' => [
+        'client_id' => env('ONEDRIVE_CLIENT_ID'),
+        'client_secret' => env('ONEDRIVE_CLIENT_SECRET'),
+        'refresh_token' => env('ONEDRIVE_REFRESH_TOKEN'),
+    ],
+
 
 ];

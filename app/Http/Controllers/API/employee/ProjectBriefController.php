@@ -8,6 +8,8 @@ use Illuminate\Http\Request;
 use App\Models\BriefAttachment;
 use App\Models\ProjectBrief;
 use Illuminate\Support\Facades\Storage;
+use App\Services\OneDriveService;
+
 
 
 class ProjectBriefController extends Controller
@@ -35,13 +37,20 @@ class ProjectBriefController extends Controller
             'brief_date' => $request->brief_date,
         ]);
 
-        if ($request->hasFile('attachments')) {
+       if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('brief_attachments', 'public'); // saves to storage/app/public/task_attachments
+
+                $path = 'brief_attachments/' . $brief->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 BriefAttachment::create([
-                    'brief_id' => $brief->id,
-                    'created_by' => auth()->id(),
+                    'brief_id'   => $brief->id,
+                    'created_by'=> auth()->id(),
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -49,6 +58,7 @@ class ProjectBriefController extends Controller
                 ]);
             }
         }
+
 
         briefAddedNotification($request->project_id, "project_brief_added");
 
@@ -82,7 +92,14 @@ class ProjectBriefController extends Controller
         // Handle new file uploads (optional addition)
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('brief_attachments', 'public');
+
+                $path = 'brief_attachments/' . $brief->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 BriefAttachment::create([
                     'brief_id'   => $brief->id,
@@ -98,13 +115,21 @@ class ProjectBriefController extends Controller
         // Handle file deletions (if any)
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
-                $attachment = BriefAttachment::where('brief_id', $brief->id)->find($attachmentId);
+
+                $attachment = BriefAttachment::where('brief_id', $brief->id)
+                    ->where('id', $attachmentId)
+                    ->first();
+
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path); // delete physical file
-                    $attachment->delete(); // delete DB record
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
+                    $attachment->delete();
                 }
             }
         }
+
 
         return response()->json([
             'message' => 'Project Brief updated successfully.',

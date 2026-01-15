@@ -14,6 +14,8 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use App\Models\WorkSession;
 use App\Models\Project;
+use App\Services\OneDriveService;
+
 
 
 
@@ -84,11 +86,18 @@ class ProjectTaskController extends Controller
 
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('task_attachments', 'public');
+
+                $path = 'task_attachments/' . $task->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 TaskAttachment::create([
-                    'task_id' => $task->id,
-                    'user_id' => auth()->id(),
+                    'task_id'   => $task->id,
+                    'user_id'   => auth()->id(),
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -96,6 +105,7 @@ class ProjectTaskController extends Controller
                 ]);
             }
         }
+
 
         return response()->json(['message' => 'Task created and assigned successfully.', 'task' => $task]);
     }
@@ -284,14 +294,21 @@ class ProjectTaskController extends Controller
             'completed_date',
         ]));
 
-        // File upload logic stays the same
+        // Add attachments
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('task_attachments', 'public');
+
+                $path = 'task_attachments/' . $task->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 TaskAttachment::create([
-                    'task_id' => $task->id,
-                    'user_id' => auth()->id(),
+                    'task_id'   => $task->id,
+                    'user_id'   => auth()->id(),
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -300,15 +317,24 @@ class ProjectTaskController extends Controller
             }
         }
 
+        // Delete attachments
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
-                $attachment = TaskAttachment::where('task_id', $task->id)->find($attachmentId);
+
+                $attachment = TaskAttachment::where('task_id', $task->id)
+                    ->where('id', $attachmentId)
+                    ->first();
+
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path);
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
                     $attachment->delete();
                 }
             }
         }
+
 
         // ✅ NEW: Update parent Project (Job) Status based on all child tasks
         $this->updateParentProjectStatus($task->project_id);

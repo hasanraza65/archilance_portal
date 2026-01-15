@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Storage;
 use App\Models\User;
 use App\Models\Project;
 use App\Models\ProjectAssignee;
+use App\Services\OneDriveService;
 
 
 class ProjectChatController extends Controller
@@ -34,9 +35,17 @@ class ProjectChatController extends Controller
 
         // Handle attachments
         $attachments = [];
+
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('project_chat_attachments', 'public');
+
+                $path = 'project_chat_attachments/' . $chat->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 ProjectChatAttachment::create([
                     'chat_id'   => $chat->id,
@@ -47,10 +56,11 @@ class ProjectChatController extends Controller
                     'file_name' => $file->getClientOriginalName(),
                 ]);
 
-                // Store absolute path for email attachment
-                $attachments[] = storage_path('app/public/' . $path);
+                // ✅ Use OneDrive direct download URL for email
+                $attachments[] = app(OneDriveService::class)->getDirectFileUrl($path);
             }
         }
+
 
 
         //send email 
@@ -159,10 +169,17 @@ class ProjectChatController extends Controller
 
         $chat->update(['message' => $request->message]);
 
-        // Add attachments
+      // Add attachments
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('project_chat_attachments', 'public');
+
+                $path = 'project_chat_attachments/' . $chat->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 ProjectChatAttachment::create([
                     'chat_id'   => $chat->id,
@@ -178,15 +195,21 @@ class ProjectChatController extends Controller
         // Delete attachments
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
+
                 $attachment = ProjectChatAttachment::where('chat_id', $chat->id)
-                    ->find($attachmentId);
+                    ->where('id', $attachmentId)
+                    ->first();
 
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path);
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
                     $attachment->delete();
                 }
             }
         }
+
 
         return response()->json([
             'message' => 'Message updated.',

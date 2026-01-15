@@ -19,41 +19,41 @@ use Illuminate\Support\Facades\DB;
 class ProjectController extends Controller
 {
     public function index(Request $request)
-{
-    $statusOrder = [
-        'On Hold' => 1,
-        'Backlog' => 2,
-        'Awaiting Info' => 3,
-        'In Progress' => 4,
-        'In-house review' => 5,
-        'Client Review' => 6,
-        'Completed' => 7,
-    ];
+    {
+        $statusOrder = [
+            'On Hold' => 1,
+            'Backlog' => 2,
+            'Awaiting Info' => 3,
+            'In Progress' => 4,
+            'In-house review' => 5,
+            'Client Review' => 6,
+            'Completed' => 7,
+        ];
 
-    // ✅ Fetch all projects with relations
-   $projects = Project::latest()
-            ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
-            ->when($request->customer_id, function ($query) use ($request) {
-                $query->where('customer_id', $request->customer_id);
-            })
-            ->get();
+        // ✅ Fetch all projects with relations
+    $projects = Project::latest()
+                ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+                ->when($request->customer_id, function ($query) use ($request) {
+                    $query->where('customer_id', $request->customer_id);
+                })
+                ->get();
 
-    // ✅ Group projects by status
-    $grouped = [];
-    foreach ($projects as $project) {
-        $status = $project->status ?? 'Unknown';
-        $grouped[$status][] = $project;
+        // ✅ Group projects by status
+        $grouped = [];
+        foreach ($projects as $project) {
+            $status = $project->status ?? 'Unknown';
+            $grouped[$status][] = $project;
+        }
+
+        // ✅ Sort groups based on $statusOrder
+        uksort($grouped, function ($a, $b) use ($statusOrder) {
+            $orderA = $statusOrder[$a] ?? 999;
+            $orderB = $statusOrder[$b] ?? 999;
+            return $orderA <=> $orderB;
+        });
+
+        return response()->json($grouped);
     }
-
-    // ✅ Sort groups based on $statusOrder
-    uksort($grouped, function ($a, $b) use ($statusOrder) {
-        $orderA = $statusOrder[$a] ?? 999;
-        $orderB = $statusOrder[$b] ?? 999;
-        return $orderA <=> $orderB;
-    });
-
-    return response()->json($grouped);
-}
 
 
     public function projectsWithTasks(Request $request)

@@ -14,6 +14,9 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use App\Models\WorkSession;
 use App\Models\Project;
+use App\Services\OneDriveService;
+
+
 
 
 class ProjectTaskController extends Controller
@@ -78,11 +81,17 @@ class ProjectTaskController extends Controller
         // Handle file attachments
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('task_attachments', 'public'); // saves to storage/app/public/task_attachments
-
+        
+                $path = 'task_attachments/' . $task->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+        
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
+        
                 TaskAttachment::create([
-                    'task_id' => $task->id,
-                    'user_id' => auth()->id(),
+                    'task_id'   => $task->id,
+                    'user_id'   => auth()->id(),
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -164,8 +173,7 @@ class ProjectTaskController extends Controller
         $totalSeconds = 0;
 
         foreach ($sessions as $session) {
-            \Log::info("Processing session ID: " . $session->id);
-            \Log::info("Session data - Start: {$session->start_date} {$session->start_time}, End: {$session->end_date} {$session->end_time}");
+           
 
             try {
                 // Parse start time
@@ -174,24 +182,23 @@ class ProjectTaskController extends Controller
                 // Parse end time (handle running sessions and null end dates)
                 if (is_null($session->end_time)) {
                     $sessionEnd = now();
-                    \Log::info("Session is still running, using current time");
+                    
                 } else {
                     $endDate = $session->end_date ?? $session->start_date;
                     $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
                 }
 
-                \Log::info("Parsed times - Start: " . $sessionStart->format('Y-m-d H:i:s') .
-                    ", End: " . $sessionEnd->format('Y-m-d H:i:s'));
+              
 
                 // Calculate duration - ensure it's positive
                 $sessionDuration = $sessionEnd->diffInSeconds($sessionStart);
-                \Log::info("Raw session duration: $sessionDuration seconds");
+                
 
                 // If duration is negative, swap the times (this handles cases where end time is before start time)
                 if ($sessionDuration < 0) {
-                    \Log::warning("Negative duration detected, swapping start and end times");
+                   
                     $sessionDuration = $sessionStart->diffInSeconds($sessionEnd);
-                    \Log::info("Corrected session duration: $sessionDuration seconds");
+                    
                 }
 
                 // Subtract adjustments
@@ -200,11 +207,11 @@ class ProjectTaskController extends Controller
                     ->where('session_id', $session->id)
                     ->get();
 
-                \Log::info("Found " . $adjustments->count() . " adjustments for session");
+               
 
                 foreach ($adjustments as $adj) {
                     if (empty($adj->start_time) || empty($adj->end_time)) {
-                        \Log::warning("Invalid adjustment times for session: " . $session->id);
+                        
                         continue;
                     }
 
@@ -219,7 +226,7 @@ class ProjectTaskController extends Controller
                         }
 
                         $adjustmentSeconds += $adjustmentDuration;
-                        \Log::info("Adjustment duration: $adjustmentDuration seconds");
+                      
                     } catch (\Exception $e) {
                         \Log::error("Error parsing adjustment times: " . $e->getMessage());
                         continue;
@@ -227,13 +234,13 @@ class ProjectTaskController extends Controller
                 }
 
                 $netSeconds = $sessionDuration - $adjustmentSeconds;
-                \Log::info("Net seconds after adjustments: $netSeconds");
+               
 
                 if ($netSeconds > 0) {
                     $totalSeconds += $netSeconds;
-                    \Log::info("Added to total: $netSeconds seconds");
+                    
                 } else {
-                    \Log::warning("Net seconds is negative or zero: $netSeconds, skipping");
+                   
                 }
 
             } catch (\Exception $e) {
@@ -242,7 +249,7 @@ class ProjectTaskController extends Controller
             }
         }
 
-        \Log::info("Final total seconds: $totalSeconds");
+
         return $totalSeconds;
     }
 
@@ -292,14 +299,21 @@ class ProjectTaskController extends Controller
             'completed_date',
         ]));
 
-        // File upload logic stays the same
+      // Upload new attachments to OneDrive
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('task_attachments', 'public');
+
+                $path = 'task_attachments/' . $task->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 TaskAttachment::create([
-                    'task_id' => $task->id,
-                    'user_id' => auth()->id(),
+                    'task_id'   => $task->id,
+                    'user_id'   => auth()->id(),
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -308,16 +322,23 @@ class ProjectTaskController extends Controller
             }
         }
 
+        // Delete attachments from OneDrive
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
-                $attachment = TaskAttachment::where('task_id', $task->id)->find($attachmentId);
+
+                $attachment = TaskAttachment::where('task_id', $task->id)
+                    ->where('id', $attachmentId)
+                    ->first();
+
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path);
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
                     $attachment->delete();
                 }
             }
         }
-
 
         // ✅ NEW: Update parent Project (Job) Status based on all child tasks
         $this->updateParentProjectStatus($task->project_id);

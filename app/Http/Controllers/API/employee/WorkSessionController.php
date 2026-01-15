@@ -12,6 +12,8 @@ use Carbon\CarbonInterval;
 use Illuminate\Support\Facades\DB;
 use App\Models\TrackWindow;
 use App\Models\WorkingHour;
+use Illuminate\Support\Facades\Validator;
+
 
 class WorkSessionController extends Controller
 {
@@ -353,6 +355,52 @@ class WorkSessionController extends Controller
         return response()->json([
             'message' => 'Manual time added successfully.',
             'work_session' => $data
+        ]);
+
+    }
+
+
+    public function sessionHeartBeat(Request $request)
+    {
+        // ✅ Validate request
+        $validator = Validator::make($request->all(), [
+            'session_id' => 'required|exists:work_sessions,id',
+            'type' => 'nullable|string|max:255',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Invalid data',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        // ✅ Find session
+        $session = WorkSession::find($request->session_id);
+
+        // (Extra safety — should never hit because of validation)
+        if (!$session) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Session not found',
+            ], 404);
+        }
+
+        // ✅ Update heartbeat
+        $session->update([
+            'last_heartbeat' => Carbon::now(),
+            'last_heartbeat_type' => $request->type ?? 'Active',
+        ]);
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Heartbeat updated successfully',
+            'data' => [
+                'session_id' => $session->id,
+                'last_heartbeat' => $session->last_heartbeat,
+                'last_heartbeat_type' => $session->last_heartbeat_type,
+            ],
         ]);
 
     }

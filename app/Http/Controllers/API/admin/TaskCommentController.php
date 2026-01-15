@@ -9,6 +9,7 @@ use App\Models\TaskCommentAttachment;
 use App\Models\TaskCommentReadStatus;
 use Auth;
 use Illuminate\Support\Facades\Storage;
+use App\Services\OneDriveService;
 
 class TaskCommentController extends Controller
 {
@@ -91,10 +92,17 @@ class TaskCommentController extends Controller
             'allowed_customer' => $request->allowed_customer ?? 0
         ]);
 
-        // Handle file uploads
+       // Handle file uploads
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('task_comment_attachments', 'public');
+
+                $path = 'task_comment_attachments/' . $comment->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 TaskCommentAttachment::create([
                     'comment_id' => $comment->id,
@@ -102,7 +110,7 @@ class TaskCommentController extends Controller
                     'file_path'  => $path,
                     'file_type'  => $file->getClientMimeType(),
                     'file_size'  => $file->getSize(),
-                    'file_name' => $file->getClientOriginalName(),
+                    'file_name'  => $file->getClientOriginalName(),
                 ]);
             }
         }
@@ -154,7 +162,14 @@ class TaskCommentController extends Controller
         // Handle new file uploads
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('task_comment_attachments', 'public');
+
+                $path = 'task_comment_attachments/' . $comment->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 TaskCommentAttachment::create([
                     'comment_id' => $comment->id,
@@ -162,7 +177,7 @@ class TaskCommentController extends Controller
                     'file_path'  => $path,
                     'file_type'  => $file->getClientMimeType(),
                     'file_size'  => $file->getSize(),
-                    'file_name' => $file->getClientOriginalName(),
+                    'file_name'  => $file->getClientOriginalName(),
                 ]);
             }
         }
@@ -170,10 +185,17 @@ class TaskCommentController extends Controller
         // Handle deletions of existing attachments
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
-                $attachment = TaskCommentAttachment::where('comment_id', $comment->id)->find($attachmentId);
+
+                $attachment = TaskCommentAttachment::where('comment_id', $comment->id)
+                    ->where('id', $attachmentId)
+                    ->first();
+
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path); // Delete file
-                    $attachment->delete(); // Delete DB record
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
+                    $attachment->delete();
                 }
             }
         }

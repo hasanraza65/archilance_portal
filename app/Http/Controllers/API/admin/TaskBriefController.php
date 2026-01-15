@@ -8,6 +8,7 @@ use Auth;
 use App\Models\TaskBrief;
 use App\Models\BriefAttachment;
 use Illuminate\Support\Facades\Storage;
+use App\Services\OneDriveService;
 
 class TaskBriefController extends Controller
 {
@@ -36,11 +37,18 @@ class TaskBriefController extends Controller
 
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('brief_attachments', 'public'); // saves to storage/app/public/task_attachments
+
+                $path = 'brief_attachments/' . $brief->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 BriefAttachment::create([
-                    'brief_id' => $brief->id,
-                    'created_by' => auth()->id(),
+                    'brief_id'   => $brief->id,
+                    'created_by'=> auth()->id(),
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -79,10 +87,17 @@ class TaskBriefController extends Controller
             'brief_date',
         ]));
 
-        // Handle new file uploads (optional addition)
+      // Handle new file uploads
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('brief_attachments', 'public');
+
+                $path = 'brief_attachments/' . $brief->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 BriefAttachment::create([
                     'brief_id'   => $brief->id,
@@ -95,13 +110,20 @@ class TaskBriefController extends Controller
             }
         }
 
-        // Handle file deletions (if any)
+        // Handle file deletions
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
-                $attachment = BriefAttachment::where('brief_id', $brief->id)->find($attachmentId);
+
+                $attachment = BriefAttachment::where('brief_id', $brief->id)
+                    ->where('id', $attachmentId)
+                    ->first();
+
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path); // delete physical file
-                    $attachment->delete(); // delete DB record
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
+                    $attachment->delete();
                 }
             }
         }
