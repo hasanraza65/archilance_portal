@@ -11,6 +11,8 @@ use App\Models\ChatReadStatus;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use App\Models\User;
+use App\Services\OneDriveService;
+
 
 class ChatController extends Controller
 {
@@ -33,7 +35,14 @@ class ChatController extends Controller
         // Handle attachments
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('chat_attachments', 'public');
+
+                $path = 'chat_attachments/' . $chat->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 ChatAttachment::create([
                     'chat_id'   => $chat->id,
@@ -93,9 +102,17 @@ class ChatController extends Controller
             'message' => $request->message,
         ]);
 
+       // Handle new file uploads
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
-                $path = $file->store('chat_attachments', 'public');
+
+                $path = 'chat_attachments/' . $chat->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+
+                // Upload to OneDrive
+                app(OneDriveService::class)->upload(
+                    $path,
+                    file_get_contents($file->getRealPath())
+                );
 
                 ChatAttachment::create([
                     'chat_id'   => $chat->id,
@@ -108,11 +125,19 @@ class ChatController extends Controller
             }
         }
 
+        // Handle deletions of existing attachments
         if ($request->has('delete_attachments')) {
             foreach ($request->delete_attachments as $attachmentId) {
-                $attachment = ChatAttachment::where('chat_id', $chat->id)->find($attachmentId);
+
+                $attachment = ChatAttachment::where('chat_id', $chat->id)
+                    ->where('id', $attachmentId)
+                    ->first();
+
                 if ($attachment) {
-                    Storage::disk('public')->delete($attachment->file_path);
+                    // Delete from OneDrive
+                    app(OneDriveService::class)->delete($attachment->file_path);
+
+                    // Delete DB record
                     $attachment->delete();
                 }
             }

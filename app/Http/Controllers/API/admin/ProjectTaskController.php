@@ -35,6 +35,15 @@ class ProjectTaskController extends Controller
         return response()->json($tasks);
     }
 
+    public function allTasks()
+    {
+        $query = ProjectTask::with(['assignees', 'assignees.user', 'comments', 'creator', 'attachments', 'parentTask'])->get();
+
+        //$tasks = $query->whereNull('parent_task_id')->get();
+
+        return response()->json($query);
+    }
+
     // ✅ Store new task
     public function store(Request $request)
     {

@@ -24,6 +24,13 @@ Route::post('/register', [AuthController::class, 'register']);
 
 Route::post('/slack/interactions', [SlackController::class, 'handle']);
 
+Route::post('/slack/jobs', [SlackController::class, 'jobsList']);
+
+Route::get('/slack/tasks', [SlackController::class, 'tasksList']);
+
+Route::post('/slack/options', [SlackController::class, 'optionsLoader']);
+
+
 Route::get('/auth/onedrive', [OneDriveAuthController::class, 'redirect']);
 Route::get('/auth/onedrive/callback', [OneDriveAuthController::class, 'callback']);
 
@@ -291,6 +298,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
         Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
+
+
+        Route::get('/all-project-tasks', [App\Http\Controllers\API\employee\ProjectTaskController::class, 'allTasks']);
 
     });
 

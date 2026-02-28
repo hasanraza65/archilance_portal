@@ -47,35 +47,39 @@ class AuthController extends Controller
         ]);
     }
 
-    public function login(Request $request)
-    {
-        $request->validate([
-            'login' => 'required|string',
-            'password' => 'required|string'
-        ]);
+   public function login(Request $request)
+{
+    $request->validate([
+        'login' => 'required|string',
+        'password' => 'required|string'
+    ]);
 
-        $user = User::where('email', $request->login)
-            ->orWhere('username', $request->login)
-            ->orWhere('phone', $request->login)
-            ->first();
+    $user = User::where('email', $request->login)
+        ->orWhere('username', $request->login)
+        ->orWhere('phone', $request->login)
+        ->first();
 
-        if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json(['message' => 'Invalid credentials'], 401);
-        }
-
-        $token = $user->createToken('auth_token')->plainTextToken;
-
-        //\Log::info('fcm token '.$request->fcm_token);
-
-        $user->fcm_token = $request->fcm_token;
-        $user->update();
-
-        return response()->json([
-            'access_token' => $token,
-            'token_type' => 'Bearer',
-            'user' => $user
-        ]);
+    if (!$user || !Hash::check($request->password, $user->password)) {
+        return response()->json(['message' => 'Invalid credentials'], 401);
     }
+
+    // ✅ Get client IP
+    $ip = $request->header('X-Forwarded-For') ?? $request->ip();
+
+    // Update user with IP and FCM token
+    $user->ip_address = $ip;
+    $user->fcm_token = $request->fcm_token;
+    $user->save();
+
+    $token = $user->createToken('auth_token')->plainTextToken;
+
+    return response()->json([
+        'access_token' => $token,
+        'token_type' => 'Bearer',
+        'user' => $user
+    ]);
+}
+
 
     public function logout(Request $request)
     {

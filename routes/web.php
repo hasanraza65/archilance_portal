@@ -75,5 +75,13 @@ Route::get('/onedrive-image', function (Request $request) {
 
 
 
+Route::get('/run-scheduler', function () {
+    // Run the scheduler
+    Artisan::call('schedule:run');
+
+    // Return a message indicating the scheduler has been run
+    return 'Scheduler has been executed.';
+});
+
 
 

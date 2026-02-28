@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\DB;
 use App\Models\WorkSession;
 use App\Models\Project;
 use App\Services\OneDriveService;
+use Illuminate\Support\Facades\Auth;
 
 
 
@@ -31,6 +32,31 @@ class ProjectTaskController extends Controller
         }
 
         $tasks = $query->whereNull('parent_task_id')->get();
+
+        return response()->json($tasks);
+    }
+
+    public function allTasks()
+    {
+        $user = Auth::user();
+
+        $query = ProjectTask::with([
+            'assignees',
+            'assignees.user',
+            'comments',
+            'creator',
+            'attachments',
+            'parentTask'
+        ]);
+
+        // If Employee → only show assigned tasks
+        if ($user->employee_type === "Employee") {
+            $query->whereHas('assignees', function ($q) use ($user) {
+                $q->where('employee_id', $user->id);
+            });
+        }
+
+        $tasks = $query->get();
 
         return response()->json($tasks);
     }

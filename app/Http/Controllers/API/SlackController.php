@@ -25,8 +25,10 @@ class SlackController extends Controller
     
             if ($payload['type'] === 'message_action' &&
                 $payload['callback_id'] === 'make_task_from_message') {
+                    
+                return $this->openTaskModal($payload);
     
-                return $this->makeTaskFromSlack($payload);
+               // return $this->makeTaskFromSlack($payload);
             }
     
             return response()->json(['ok' => true]);
@@ -44,6 +46,123 @@ class SlackController extends Controller
             ]);
         }
     }
+    
+    
+   private function openTaskModal(array $payload)
+{
+    $triggerId = $payload['trigger_id'];
+    $messageText = $payload['message']['text'] ?? '';
+
+    $modal = [
+        "trigger_id" => $triggerId,
+        "view" => [
+            "type" => "modal",
+            "callback_id" => "task_modal_submit",
+            "private_metadata" => json_encode(['job_id' => null]), // initial empty
+            "title" => [
+                "type" => "plain_text",
+                "text" => "Create Task"
+            ],
+            "submit" => [
+                "type" => "plain_text",
+                "text" => "Create"
+            ],
+            "close" => [
+                "type" => "plain_text",
+                "text" => "Cancel"
+            ],
+            "blocks" => [
+                [
+                    "type" => "input",
+                    "block_id" => "job_block",
+                    "label" => [
+                        "type" => "plain_text",
+                        "text" => "Select Job"
+                    ],
+                    "element" => [
+                        "type" => "external_select",
+                        "action_id" => "job_select",
+                        "placeholder" => [
+                            "type" => "plain_text",
+                            "text" => "Choose job..."
+                        ]
+                    ]
+                ],
+                [
+                    "type" => "input",
+                    "optional" => true,
+                    "block_id" => "parent_task_block",
+                    "label" => [
+                        "type" => "plain_text",
+                        "text" => "Parent Task (optional)"
+                    ],
+                    "element" => [
+                        "type" => "external_select",
+                        "action_id" => "task_select",
+                        "placeholder" => [
+                            "type" => "plain_text",
+                            "text" => "Choose parent task..."
+                        ]
+                    ]
+                ],
+                [
+                    "type" => "input",
+                    "block_id" => "title_block",
+                    "label" => [
+                        "type" => "plain_text",
+                        "text" => "Task Title"
+                    ],
+                    "element" => [
+                        "type" => "plain_text_input",
+                        "action_id" => "task_title",
+                        "initial_value" => $messageText
+                    ]
+                ]
+            ]
+        ]
+    ];
+
+    Http::withToken(config('services.slack.bot_token'))
+        ->post("https://slack.com/api/views.open", $modal);
+
+    return response()->json(['ok' => true]);
+}
+
+
+
+public function handleSelectMenu(Request $request)
+{
+    $payload = json_decode($request->input('payload'), true);
+    $actionId = $payload['actions'][0]['action_id'] ?? null;
+
+    if ($actionId === 'job_select') {
+        $selectedJobId = $payload['actions'][0]['selected_option']['value'] ?? null;
+
+        // Update modal's private_metadata with the selected job
+        $metadata = ['job_id' => $selectedJobId];
+
+        // Call Slack API to update the modal
+        Http::withToken(config('services.slack.bot_token'))
+            ->post('https://slack.com/api/views.update', [
+                'view_id' => $payload['view']['id'],
+                'hash' => $payload['view']['hash'],
+                'view' => [
+                    'type' => 'modal',
+                    'callback_id' => $payload['view']['callback_id'],
+                    'private_metadata' => json_encode($metadata),
+                    'title' => $payload['view']['title'],
+                    'submit' => $payload['view']['submit'],
+                    'close' => $payload['view']['close'],
+                    'blocks' => $payload['view']['blocks'],
+                ]
+            ]);
+    }
+
+    return response()->json(['ok' => true]);
+}
+
+
+
 
 
     private function verifySlackSignature(Request $request)
@@ -100,10 +219,10 @@ class SlackController extends Controller
           //  \Log::info('Task created', ['task_id' => $task->id]);
             
             $responseUrl = $payload['response_url'];
-Http::post($responseUrl, [
-    'response_type' => 'ephemeral',
-    'text' => "✅ Task created: *{$task->task_title}*"
-]);
+            Http::post($responseUrl, [
+                'response_type' => 'ephemeral',
+                'text' => "✅ Task created: *{$task->task_title}*"
+            ]);
     
             return response()->json(['ok' => true]);
     
@@ -119,4 +238,133 @@ Http::post($responseUrl, [
             ]);
         }
     }
+    
+    public function jobsList(Request $request)
+    {
+        $payload = json_decode($request->input('payload'), true);
+    
+        $search = $payload['value'] ?? '';
+    
+        $projects = Project::query()
+            ->when($search, function ($q) use ($search) {
+                $q->where('project_name', 'like', "%{$search}%");
+            })
+            ->orderBy('id', 'desc')
+            ->limit(50)
+            ->get();
+    
+        $options = $projects->map(function($p){
+            return [
+                "text" => [
+                    "type" => "plain_text",
+                    "text" => substr($p->project_name ?? "Project #".$p->id, 0, 70)
+                ],
+                "value" => (string) $p->id
+            ];
+        })->values()->toArray();
+    
+        return response()->json([
+            "options" => $options
+        ]);
+    }
+
+
+    public function tasksList(Request $request)
+    {
+        $payload = json_decode($request->input('payload'), true);
+
+        // get selected job_id
+        $jobId = $payload['view']['state']['values']['job_block']['job_select']['selected_option']['value'] ?? null;
+
+        $query = ProjectTask::query();
+
+        if ($jobId) {
+            $query->where('project_id', $jobId);
+        }
+
+        $tasks = $query->orderBy('id', 'desc')->limit(50)->get();
+
+        $options = $tasks->map(function ($t) {
+            return [
+                "text" => [
+                    "type" => "plain_text",
+                    "text" => $t->task_title
+                ],
+                "value" => (string) $t->id
+            ];
+        });
+
+        return response()->json([
+            "options" => $options
+        ]);
+    }
+    
+    
+    public function optionsLoader(Request $request)
+{
+    $payload = json_decode($request->input('payload'), true);
+
+    $actionId = $payload['action_id'] ?? '';
+    $search   = $payload['value'] ?? '';
+
+    // ---------------- JOB DROPDOWN ----------------
+    if ($actionId === "job_select") {
+
+        $projects = Project::query()
+            ->when($search, function ($q) use ($search) {
+                $q->where('project_name', 'like', "%{$search}%");
+            })
+            ->orderBy('id', 'desc')
+            ->limit(50)
+            ->get();
+
+        $options = $projects->map(function($p){
+            return [
+                "text" => [
+                    "type" => "plain_text",
+                    "text" => substr($p->project_name ?? "Project #".$p->id, 0, 70)
+                ],
+                "value" => (string) $p->id
+            ];
+        })->values()->toArray();
+
+        return response()->json(["options" => $options]);
+    }
+
+    // ---------------- TASK DROPDOWN ----------------
+    if ($actionId === "task_select") {
+
+        $jobId = $payload['view']['state']['values']['job_block']['job_select']['selected_option']['value'] ?? null;
+        
+        \Log::info('job id: '.$jobId);
+        \Log::info(json_encode($payload));
+
+        $tasks = ProjectTask::query()
+            ->when($jobId, function ($q) use ($jobId) {
+                $q->where('project_id', $jobId);
+            })
+            ->when($search, function ($q) use ($search) {
+                $q->where('task_title', 'like', "%{$search}%");
+            })
+            ->orderBy('id', 'desc')
+            ->limit(50)
+            ->get();
+
+        $options = $tasks->map(function($t){
+            return [
+                "text" => [
+                    "type" => "plain_text",
+                    "text" => substr($t->task_title ?? "Task #".$t->id, 0, 70)
+                ],
+                "value" => (string) $t->id
+            ];
+        })->values()->toArray();
+
+        return response()->json(["options" => $options]);
+    }
+
+    // fallback
+    return response()->json(["options" => []]);
+}
+
 }

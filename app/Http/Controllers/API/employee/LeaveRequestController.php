@@ -9,6 +9,7 @@ use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 use \Carbon\Carbon;
 use Carbon\CarbonInterface;
+use Carbon\CarbonPeriod;
 
 class LeaveRequestController extends Controller
 {
@@ -29,7 +30,7 @@ class LeaveRequestController extends Controller
 
     // All valid leave requests
     $leaveRequests = LeaveRequest::where('user_id', $userId)
-        ->where('status', '!=', 'Rejected')
+        //->where('status', '!=', 'Rejected')
         ->whereBetween('start_date', [$cycleStart, $cycleEnd])
         ->get();
 
@@ -101,108 +102,108 @@ class LeaveRequestController extends Controller
 
     // Submit a new leave request
     public function store(Request $request)
-    {
-        $request->validate([
-            'leave_type' => 'required|in:sick,casual,annual',
-            'reason' => 'nullable|string',
-            'start_date' => 'required|date',
-            'end_date' => 'required|date|after_or_equal:start_date',
-        ]);
+{
+    $request->validate([
+        'leave_type' => 'required|in:sick,casual,annual',
+        'reason' => 'nullable|string',
+        'start_date' => 'required|date',
+        'end_date' => 'required|date|after_or_equal:start_date',
+    ]);
 
-        $userId = Auth::id();
-        $leaveType = $request->leave_type;
-        $startDate = Carbon::parse($request->start_date);
-        $endDate = Carbon::parse($request->end_date);
+    $userId = Auth::id();
+    $leaveType = $request->leave_type;
+    $startDate = Carbon::parse($request->start_date);
+    $endDate = Carbon::parse($request->end_date);
 
-        // Calculate number of days applied for
-        $daysRequested = $startDate->diffInDays($endDate) + 1;
+    // Calculate number of weekdays (Mon-Fri) applied for
+    $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
+        ->filter(fn($date) => !$date->isWeekend())
+        ->count();
 
-        // Leave limits
-        $limits = [
-            'casual' => 10,
-            'annual' => 10,
-            'sick' => 8,
-        ];
+    // Leave limits
+    $limits = [
+        'casual' => 10,
+        'annual' => 10,
+        'sick' => 8,
+    ];
 
-        // ✅ Check consecutive rule for casual leave
-        if ($leaveType === 'casual' && $daysRequested > 2) {
-            return response()->json([
-                'message' => 'Casual leaves cannot be taken for more than 2 consecutive days.'
-            ], 422);
-        }
-
-        // ✅ Determine the "leave year" cycle (1 July → 30 June)
-        $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
-        $yearStart = Carbon::create($year, 7, 1)->startOfDay();
-        $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
-
-        // ✅ Count total leaves of this type within this leave year
-        $usedLeaves = LeaveRequest::where('user_id', $userId)
-            ->where('leave_type', $leaveType)
-            ->where('status', '!=', 'Rejected')
-            ->where(function ($q) use ($yearStart, $yearEnd) {
-                $q->whereBetween('start_date', [$yearStart, $yearEnd])
-                    ->orWhereBetween('end_date', [$yearStart, $yearEnd]);
-            })
-            ->get()
-            ->sum(function ($leave) {
-                return Carbon::parse($leave->start_date)
-                    ->diffInDays(Carbon::parse($leave->end_date)) + 1;
-            });
-
-        // ✅ Check if limit exceeded
-        if (($usedLeaves + $daysRequested) > $limits[$leaveType]) {
-            return response()->json([
-                'message' => "You have exceeded your {$leaveType} leave limit for this leave year (1 July to 30 June). 
-            Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
-            ], 422);
-        }
-
-        // ✅ Create the leave
-        $leave = LeaveRequest::create([
-            'user_id' => $userId,
-            'leave_type' => $leaveType,
-            'reason' => $request->reason,
-            'start_date' => $startDate,
-            'end_date' => $endDate,
-            'status' => 'Pending',
-        ]);
-        
-        $sender_name = Auth::user()->name;
-        
-        
-        // Fixed emails
-        $fixedEmails = [
-            'Faran@archilance.net',
-            'info@archilance.net',
-            'HR@archilance.net'
-        ];
-        
-        // Get all managers and executives
-        $all_managers = User::where('employee_type', 'Manager')
-            ->orWhere('employee_type', 'Executive')
-            ->pluck('email')   // Only emails
-            ->toArray();
-        
-        // Merge fixed emails with managers
-        $allEmails = array_merge($fixedEmails, $all_managers);
-        
-        // Remove duplicates just in case
-        $allEmails = array_unique($allEmails);
-        
-        // Send email
-        \Mail::send('mails.new-leave-request', compact('sender_name','leaveType','endDate','startDate'), function ($message) use ($sender_name, $allEmails) {
-            $message->from("info@archilance.net", $sender_name)
-                    ->to($allEmails)
-                    ->subject($sender_name.' request for leaves - Archilance LLC');
-        });
-        
-
+    // Check consecutive rule for casual leave (weekdays only)
+    if ($leaveType === 'casual' && $daysRequested > 2) {
         return response()->json([
-            'message' => 'Leave request submitted successfully.',
-            'data' => $leave
-        ]);
+            'message' => 'Casual leaves cannot be taken for more than 2 consecutive weekdays.'
+        ], 422);
     }
+
+    // Determine the "leave year" cycle (1 July → 30 June)
+    $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
+    $yearStart = Carbon::create($year, 7, 1)->startOfDay();
+    $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
+
+    // Count total leave days (weekdays only) of this type within this leave year
+    $usedLeaves = LeaveRequest::where('user_id', $userId)
+        ->where('leave_type', $leaveType)
+        ->where('status', '!=', 'Rejected')
+        ->where(function ($q) use ($yearStart, $yearEnd) {
+            $q->whereBetween('start_date', [$yearStart, $yearEnd])
+                ->orWhereBetween('end_date', [$yearStart, $yearEnd]);
+        })
+        ->get()
+        ->sum(function ($leave) {
+            $start = Carbon::parse($leave->start_date);
+            $end = Carbon::parse($leave->end_date);
+            return collect(CarbonPeriod::create($start, $end))
+                ->filter(fn($date) => !$date->isWeekend())
+                ->count();
+        });
+
+    // Check if limit exceeded
+    if (($usedLeaves + $daysRequested) > $limits[$leaveType]) {
+        return response()->json([
+            'message' => "You have exceeded your {$leaveType} leave limit for this leave year (1 July to 30 June). 
+            Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
+        ], 422);
+    }
+
+    // Create the leave
+    $leave = LeaveRequest::create([
+        'user_id' => $userId,
+        'leave_type' => $leaveType,
+        'reason' => $request->reason,
+        'start_date' => $startDate,
+        'end_date' => $endDate,
+        'status' => 'Pending',
+    ]);
+
+    $sender_name = Auth::user()->name;
+
+    // Fixed emails
+    $fixedEmails = [
+        'Faran@archilance.net',
+        'info@archilance.net',
+        'HR@archilance.net'
+    ];
+
+    // Get all managers and executives
+    $all_managers = User::where('employee_type', 'Manager')
+        ->orWhere('employee_type', 'Executive')
+        ->pluck('email')
+        ->toArray();
+
+    // Merge fixed emails with managers
+    $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
+
+    // Send email
+    \Mail::send('mails.new-leave-request', compact('sender_name','leaveType','endDate','startDate'), function ($message) use ($sender_name, $allEmails) {
+        $message->from("info@archilance.net", $sender_name)
+                ->to($allEmails)
+                ->subject($sender_name.' request for leaves - Archilance LLC');
+    });
+
+    return response()->json([
+        'message' => 'Leave request submitted successfully.',
+        'data' => $leave
+    ]);
+}
 
     // Show a specific leave request
     public function show($id)
@@ -222,7 +223,7 @@ class LeaveRequestController extends Controller
 
         // Get relevant leave requests for this user
         $leaveRequests = LeaveRequest::where('user_id', $userId)
-            ->where('status', '!=', 'Rejected')
+            //->where('status', '!=', 'Rejected')
             ->whereBetween('start_date', [$cycleStart, $cycleEnd])
             ->get();
 
@@ -294,25 +295,109 @@ class LeaveRequestController extends Controller
 
 
     // Update a leave request (only if pending)
-    public function update(Request $request, $id)
-    {
-        $leave = LeaveRequest::where('user_id', Auth::id())->findOrFail($id);
+   public function update(Request $request, $id)
+{
+    $leave = LeaveRequest::where('user_id', Auth::id())->findOrFail($id);
 
-        if ($leave->status !== 'Pending') {
-            return response()->json(['error' => 'Cannot update approved or rejected requests.'], 403);
-        }
+    $request->validate([
+        'leave_type' => 'required|in:sick,casual,annual',
+        'reason' => 'nullable|string',
+        'start_date' => 'required|date',
+        'end_date' => 'required|date|after_or_equal:start_date',
+    ]);
 
-        $request->validate([
-            'leave_type' => 'nullable',
-            'reason' => 'nullable|string',
-            'start_date' => 'nullable|date',
-            'end_date' => 'nullable|date|after_or_equal:start_date',
-        ]);
+    $userId = Auth::id();
+    $leaveType = $request->leave_type;
+    $startDate = Carbon::parse($request->start_date);
+    $endDate = Carbon::parse($request->end_date);
 
-        $leave->update($request->only('leave_type', 'reason', 'start_date', 'end_date'));
+    // Calculate requested weekdays
+    $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
+        ->filter(fn($date) => !$date->isWeekend())
+        ->count();
 
-        return response()->json(['message' => 'Leave request updated.', 'data' => $leave]);
+    $limits = [
+        'casual' => 10,
+        'annual' => 10,
+        'sick' => 8,
+    ];
+
+    // Casual consecutive rule
+    if ($leaveType === 'casual' && $daysRequested > 2) {
+        return response()->json([
+            'message' => 'Casual leaves cannot be taken for more than 2 consecutive weekdays.'
+        ], 422);
     }
+
+    // Leave year cycle (1 July → 30 June)
+    $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
+    $yearStart = Carbon::create($year, 7, 1)->startOfDay();
+    $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
+
+    // Recalculate used leaves EXCLUDING this leave
+    $usedLeaves = LeaveRequest::where('user_id', $userId)
+        ->where('leave_type', $leaveType)
+        ->where('status', '!=', 'Rejected')
+        ->where('id', '!=', $leave->id)
+        ->where(function ($q) use ($yearStart, $yearEnd) {
+            $q->whereBetween('start_date', [$yearStart, $yearEnd])
+              ->orWhereBetween('end_date', [$yearStart, $yearEnd]);
+        })
+        ->get()
+        ->sum(function ($leave) {
+            $start = Carbon::parse($leave->start_date);
+            $end = Carbon::parse($leave->end_date);
+
+            return collect(CarbonPeriod::create($start, $end))
+                ->filter(fn($date) => !$date->isWeekend())
+                ->count();
+        });
+
+    if (($usedLeaves + $daysRequested) > $limits[$leaveType]) {
+        return response()->json([
+            'message' => "You have exceeded your {$leaveType} leave limit for this leave year (1 July to 30 June). 
+            Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
+        ], 422);
+    }
+
+    // Update and force back to Pending
+    $leave->update([
+        'leave_type' => $leaveType,
+        'reason' => $request->reason,
+        'start_date' => $startDate,
+        'end_date' => $endDate,
+        'status' => 'Pending',
+    ]);
+
+    $sender_name = Auth::user()->name;
+
+    $fixedEmails = [
+        'Faran@archilance.net',
+        'info@archilance.net',
+        'HR@archilance.net'
+    ];
+
+    $all_managers = User::where('employee_type', 'Manager')
+        ->orWhere('employee_type', 'Executive')
+        ->pluck('email')
+        ->toArray();
+
+    $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
+
+    \Mail::send('mails.new-leave-request',
+        compact('sender_name','leaveType','endDate','startDate'),
+        function ($message) use ($sender_name, $allEmails) {
+            $message->from("info@archilance.net", $sender_name)
+                    ->to($allEmails)
+                    ->subject($sender_name.' updated leave request - Archilance LLC');
+        }
+    );
+
+    return response()->json([
+        'message' => 'Leave request updated and resubmitted successfully.',
+        'data' => $leave
+    ]);
+}
 
     // Cancel a leave request (only if pending)
     public function destroy($id)
