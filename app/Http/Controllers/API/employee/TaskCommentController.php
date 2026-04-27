@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 
 use App\Models\TaskComment;
+use App\Models\ProjectTask;
 use App\Models\TaskCommentAttachment;
 use App\Models\TaskCommentReadStatus;
 use Auth;
@@ -256,6 +257,32 @@ class TaskCommentController extends Controller
         }
 
         return response()->json(['message' => 'All comments marked as read']);
+    }
+
+    public function allTasksChats()
+    {
+        $user = Auth::user();
+
+        $query = ProjectTask::with([
+                'latestComment.sender',
+                'latestComment.commentAttachments',
+                'assignees',
+                'creator'
+            ])
+            ->whereHas('comments') // only tasks that have chats
+            ->withMax('comments', 'created_at'); // get latest comment timestamp
+
+        // If Employee → only show assigned tasks
+        if ($user->employee_type === "Employee") {
+            $query->whereHas('assignees', function ($q) use ($user) {
+                $q->where('employee_id', $user->id);
+            });
+        }
+
+        $tasks = $query->orderByDesc('comments_max_created_at')
+                    ->get();
+
+        return response()->json($tasks);
     }
 }
 
