@@ -42,6 +42,11 @@ class Chat extends Model
     {
         return $this->hasMany(ChatReadStatus::class, 'message_id');
     }
+    
+    public function readStatus()
+    {
+        return $this->hasOne(ChatReadStatus::class, 'message_id');
+    }
 
     public function parent()
     {

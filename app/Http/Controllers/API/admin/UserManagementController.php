@@ -120,7 +120,8 @@ class UserManagementController extends Controller
             'phone' => $request->phone,
             'password' => bcrypt($request->password),
             'user_role' => $roleId,
-            'employee_type' => $request->employee_type ?? ''
+            'employee_type' => $request->employee_type ?? '',
+            'joining_date' => $request->joining_date
         ]);
 
         return response()->json($user, 201);
@@ -165,6 +166,7 @@ class UserManagementController extends Controller
             'username' => $request->username,
             'phone' => $request->phone,
             'employee_type' => $request->employee_type,
+            'joining_date' => $request->joining_date
         ];
     
         // Update password only if provided
@@ -186,5 +188,15 @@ class UserManagementController extends Controller
         $user->delete();
 
         return response()->json(['message' => 'User deleted successfully']);
+    }
+
+    public function updateJoiningDate(Request $request){
+
+        $data = User::find($request->employee_id);
+        $data->joining_date = $request->joining_date;
+        $data->update();
+
+        return response()->json(['message' => 'Joining date updated successfully']);
+
     }
 }

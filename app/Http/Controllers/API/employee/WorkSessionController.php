@@ -12,258 +12,267 @@ use Carbon\CarbonInterval;
 use Illuminate\Support\Facades\DB;
 use App\Models\TrackWindow;
 use App\Models\WorkingHour;
+use App\Models\ActivityLog;
 use Illuminate\Support\Facades\Validator;
 
 
 class WorkSessionController extends Controller
 {
 
-   public function index(Request $request)
-{
-    try {
-        $userId = Auth::id();
-        
-      $query = WorkSession::with('screenshots', 'taskDetail', 'userDetail', 'idleTimes')
-        ->where('user_id', $userId);
-    
-        // Use current date if no dates provided
-        $filterStartDate = $request->start_date ?? now()->toDateString();
-        $filterEndDate = $request->end_date ?? $filterStartDate;
-        
-        // Date filters
-        $query->where(function($q) use ($filterStartDate, $filterEndDate) {
-            $q->whereBetween('start_date', [$filterStartDate, $filterEndDate])
-              ->orWhereBetween('end_date', [$filterStartDate, $filterEndDate])
-              ->orWhere(function($q2) use ($filterStartDate, $filterEndDate) {
-                  $q2->where('start_date', '<', $filterStartDate)
-                     ->where('end_date', '>', $filterEndDate);
-              });
-        });
-        
-        // ✅ Extra filters for task_id / project_id
-        if ($request->filled('task_id')) {
-            $query->where('task_id', $request->task_id);
-        }
-        
-        if ($request->filled('project_id')) {
-            $query->whereHas('taskDetail', function($q) use ($request) {
-                $q->where('project_id', $request->project_id);
+    public function index(Request $request)
+    {
+        try {
+            $userId = Auth::id();
+
+            $query = WorkSession::with('screenshots', 'taskDetail', 'userDetail', 'idleTimes')
+                ->where('user_id', $userId);
+
+            // Use current date if no dates provided
+            $filterStartDate = $request->start_date ?? now()->toDateString();
+            $filterEndDate = $request->end_date ?? $filterStartDate;
+
+            // Date filters
+            $query->where(function ($q) use ($filterStartDate, $filterEndDate) {
+                $q->whereBetween('start_date', [$filterStartDate, $filterEndDate])
+                    ->orWhereBetween('end_date', [$filterStartDate, $filterEndDate])
+                    ->orWhere(function ($q2) use ($filterStartDate, $filterEndDate) {
+                        $q2->where('start_date', '<', $filterStartDate)
+                            ->where('end_date', '>', $filterEndDate);
+                    });
             });
-        }
 
-
-
-        $sessions = $query->orderBy('created_at', 'desc')->paginate(100);
-
-        $overallTotalSeconds = 0;
-        $time_strings_hr = [];
-
-        foreach ($sessions as $session) {
-            $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
-            
-            if (is_null($session->end_time)) {
-                $sessionEnd = now();
-                $session->total_time = 'Running';
-            } else {
-                $endDate = $session->end_date ?? $session->start_date;
-                $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
+            // ✅ Extra filters for task_id / project_id
+            if ($request->filled('task_id')) {
+                $query->where('task_id', $request->task_id);
             }
 
-            // Initialize duration for the filtered date range
-            $sessionDuration = 0;
-            
-            // Get all dates in the filter range
-            $filterDates = [];
-            $currentDate = Carbon::parse($filterStartDate);
-            $endDateObj = Carbon::parse($filterEndDate);
-            
-            while ($currentDate->lte($endDateObj)) {
-                $filterDates[] = $currentDate->toDateString();
-                $currentDate->addDay();
+            if ($request->filled('project_id')) {
+                $query->whereHas('taskDetail', function ($q) use ($request) {
+                    $q->where('project_id', $request->project_id);
+                });
             }
 
-            // Calculate time for each day in filter range
-            foreach ($filterDates as $date) {
-                $dayStart = Carbon::parse($date)->startOfDay();
-                $dayEnd = Carbon::parse($date)->endOfDay();
-                
-                // Get overlapping period between session and this specific day
-                $workStart = max($sessionStart, $dayStart);
-                $workEnd = min($sessionEnd, $dayEnd);
-                
-                if ($workStart->lt($workEnd)) {
-                    $sessionDuration += $workEnd->diffInSeconds($workStart);
+
+
+            $sessions = $query->orderBy('created_at', 'desc')->paginate(400);
+
+            $overallTotalSeconds = 0;
+            $time_strings_hr = [];
+
+            foreach ($sessions as $session) {
+                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+
+                if (is_null($session->end_time)) {
+                    $sessionEnd = now();
+                    $session->total_time = 'Running';
+                } else {
+                    $endDate = $session->end_date ?? $session->start_date;
+                    $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
                 }
-            }
 
-            // Calculate adjustments for the filtered period
-            $adjustmentSeconds = 0;
-            $adjustments = DB::table('session_time_adjustments')
-                ->where('session_id', $session->id)
-                ->get();
+                // Initialize duration for the filtered date range
+                $sessionDuration = 0;
 
-            foreach ($adjustments as $adj) {
-                if (empty($adj->start_time) || empty($adj->end_time)) {
-                    continue;
+                // Get all dates in the filter range
+                $filterDates = [];
+                $currentDate = Carbon::parse($filterStartDate);
+                $endDateObj = Carbon::parse($filterEndDate);
+
+                while ($currentDate->lte($endDateObj)) {
+                    $filterDates[] = $currentDate->toDateString();
+                    $currentDate->addDay();
                 }
-                
-                $adjStart = Carbon::parse($adj->start_time);
-                $adjEnd = Carbon::parse($adj->end_time);
-                
-                // Calculate adjustments day by day to respect midnight boundaries
+
+                // Calculate time for each day in filter range
                 foreach ($filterDates as $date) {
                     $dayStart = Carbon::parse($date)->startOfDay();
                     $dayEnd = Carbon::parse($date)->endOfDay();
-                    
-                    $adjStartFiltered = max($adjStart, $dayStart);
-                    $adjEndFiltered = min($adjEnd, $dayEnd);
-                    
-                    if ($adjStartFiltered->lt($adjEndFiltered)) {
-                        $adjustmentSeconds += $adjEndFiltered->diffInSeconds($adjStartFiltered);
+
+                    // Get overlapping period between session and this specific day
+                    $workStart = max($sessionStart, $dayStart);
+                    $workEnd = min($sessionEnd, $dayEnd);
+
+                    if ($workStart->lt($workEnd)) {
+                        $sessionDuration += $workEnd->diffInSeconds($workStart);
                     }
+                }
+
+                // Calculate adjustments for the filtered period
+                $adjustmentSeconds = 0;
+                $adjustments = DB::table('session_time_adjustments')
+                    ->where('session_id', $session->id)
+                    ->get();
+
+                foreach ($adjustments as $adj) {
+                    if (empty($adj->start_time) || empty($adj->end_time)) {
+                        continue;
+                    }
+
+                    $adjStart = Carbon::parse($adj->start_time);
+                    $adjEnd = Carbon::parse($adj->end_time);
+
+                    // Calculate adjustments day by day to respect midnight boundaries
+                    foreach ($filterDates as $date) {
+                        $dayStart = Carbon::parse($date)->startOfDay();
+                        $dayEnd = Carbon::parse($date)->endOfDay();
+
+                        $adjStartFiltered = max($adjStart, $dayStart);
+                        $adjEndFiltered = min($adjEnd, $dayEnd);
+
+                        if ($adjStartFiltered->lt($adjEndFiltered)) {
+                            $adjustmentSeconds += $adjEndFiltered->diffInSeconds($adjStartFiltered);
+                        }
+                    }
+                }
+
+                $netSeconds = $sessionDuration - $adjustmentSeconds;
+
+                if ($session->total_time !== 'Running') {
+                    $hours = floor(abs($netSeconds) / 3600);
+                    $minutes = floor((abs($netSeconds) % 3600) / 60);
+                    $session->total_time = sprintf('%dh %dm', $hours, $minutes);
+                    $time_strings_hr[] = $session->total_time;
+                }
+
+                $session->raw_calculation = [
+                    'filter_range' => [$filterStartDate, $filterEndDate],
+                    'session_period' => [
+                        'start' => $sessionStart->format('Y-m-d H:i:s'),
+                        'end' => $sessionEnd->format('Y-m-d H:i:s')
+                    ],
+                    'session_duration' => $sessionDuration,
+                    'adjustments' => $adjustmentSeconds,
+                    'net_seconds' => $netSeconds
+                ];
+
+                if ($netSeconds > 0) {
+                    $overallTotalSeconds += $netSeconds;
                 }
             }
 
-            $netSeconds = $sessionDuration - $adjustmentSeconds;
-            
-            if ($session->total_time !== 'Running') {
-                $hours = floor(abs($netSeconds) / 3600);
-                $minutes = floor((abs($netSeconds) % 3600) / 60);
-                $session->total_time = sprintf('%dh %dm', $hours, $minutes);
-                $time_strings_hr[] = $session->total_time;
+            // Calculate total time string
+            $totalMinutes = 0;
+            foreach ($time_strings_hr as $time) {
+                preg_match('/(\d+)h (\d+)m/', $time, $matches);
+                if (count($matches) === 3) {
+                    $hours = (int) $matches[1];
+                    $minutes = (int) $matches[2];
+                    $totalMinutes += ($hours * 60) + $minutes;
+                }
             }
 
-            $session->raw_calculation = [
-                'filter_range' => [$filterStartDate, $filterEndDate],
-                'session_period' => [
-                    'start' => $sessionStart->format('Y-m-d H:i:s'),
-                    'end' => $sessionEnd->format('Y-m-d H:i:s')
-                ],
-                'session_duration' => $sessionDuration,
-                'adjustments' => $adjustmentSeconds,
-                'net_seconds' => $netSeconds
-            ];
+            $totalHours = floor($totalMinutes / 60);
+            $remainingMinutes = $totalMinutes % 60;
+            $totalTimeString = "{$totalHours}h {$remainingMinutes}m";
 
-            if ($netSeconds > 0) {
-                $overallTotalSeconds += $netSeconds;
-            }
+            $ids = $sessions->pluck('id')->toArray();
+            $windows_activity = TrackWindow::whereIn('session_id', $ids)->get();
+
+            return response()->json(
+                array_merge(
+                    $sessions->toArray(),
+                    [
+                        'overall_total_time' => $totalTimeString,
+                        'windows_activity' => $windows_activity
+                    ]
+                )
+            );
+
+        } catch (\Exception $e) {
+            \Log::error('WorkSession Error: ' . $e->getMessage());
+            return response()->json([
+                'error' => 'Server error',
+                'message' => $e->getMessage()
+            ], 500);
         }
-
-        // Calculate total time string
-        $totalMinutes = 0;
-        foreach ($time_strings_hr as $time) {
-            preg_match('/(\d+)h (\d+)m/', $time, $matches);
-            if (count($matches) === 3) {
-                $hours = (int)$matches[1];
-                $minutes = (int)$matches[2];
-                $totalMinutes += ($hours * 60) + $minutes;
-            }
-        }
-        
-        $totalHours = floor($totalMinutes / 60);
-        $remainingMinutes = $totalMinutes % 60;
-        $totalTimeString = "{$totalHours}h {$remainingMinutes}m";
-
-         $ids = $sessions->pluck('id')->toArray();
-        $windows_activity = TrackWindow::whereIn('session_id', $ids)->get();
-        
-        return response()->json(
-            array_merge(
-                $sessions->toArray(),
-                [
-                    'overall_total_time' => $totalTimeString,
-                    'windows_activity' => $windows_activity
-                ]
-            )
-        );
-
-    } catch (\Exception $e) {
-        \Log::error('WorkSession Error: '.$e->getMessage());
-        return response()->json([
-            'error' => 'Server error',
-            'message' => $e->getMessage()
-        ], 500);
     }
-}
 
 
-    public function show($id){
+    public function show($id)
+    {
 
-        $data = WorkSession::with('screenshots','taskDetail','userDetail')
+        $data = WorkSession::with('screenshots', 'taskDetail', 'userDetail')
             ->findOrFail($id);
 
         return response()->json($data);
     }
 
-   public function store(Request $request)
-{
-    $userId = Auth::id();
-    
-    $my_working_hours = WorkingHour::where('employee_id', $userId)->get();
-    
-    $now = Carbon::now();
+    public function store(Request $request)
+    {
+        $userId = Auth::id();
 
-    // 1. Check if current time falls within any of the user's working hours
-    if ($my_working_hours->count() > 0) {
-        $withinWorkingHours = false;
-        foreach ($my_working_hours as $slot) {
-            $start = Carbon::parse($slot->start_time);
-            $end = Carbon::parse($slot->end_time);
+        $my_working_hours = WorkingHour::where('employee_id', $userId)->get();
 
-            // Check if current time is within this slot
-            if ($now->between($start, $end)) {
-                $withinWorkingHours = true;
-                break;
+        if ($userId == 173 || $userId == 146) {
+            $now = Carbon::now()->subHours(2);
+        } elseif ($userId == 182) {
+            $now = Carbon::now()->addHours(2);
+        } else {
+            $now = Carbon::now();
+        }
+
+
+        // 1. Check if current time falls within any of the user's working hours
+        if ($my_working_hours->count() > 0) {
+            $withinWorkingHours = false;
+            foreach ($my_working_hours as $slot) {
+                $start = Carbon::parse($slot->start_time);
+                $end = Carbon::parse($slot->end_time);
+
+                // Check if current time is within this slot
+                if ($now->between($start, $end)) {
+                    $withinWorkingHours = true;
+                    break;
+                }
+            }
+
+            if (!$withinWorkingHours) {
+                return response()->json([
+                    'error' => 'You cannot start a work session outside your working hours.',
+                    'error_code' => "working_hours_restriction"
+                ], 404);
             }
         }
+        // If no working hours defined, allow starting anytime
 
-        if (!$withinWorkingHours) {
-            return response()->json([
-                'error' => 'You cannot start a work session outside your working hours.',
-                'error_code' => "working_hours_restriction"
-            ], 404);
-        }
-    }
-    // If no working hours defined, allow starting anytime
-
-    // 2. Check if any open session exists for this user
-    $openSession = WorkSession::where('user_id', $userId)
-        ->whereNull('end_time')
-        ->latest('start_time')
-        ->first();
-
-    // 3. Close the previous open session (if exists)
-    if ($openSession) {
-        $lastScreenshot = Screenshot::where('session_id', $openSession->id)
-            ->latest('created_at')
+        // 2. Check if any open session exists for this user
+        $openSession = WorkSession::where('user_id', $userId)
+            ->whereNull('end_time')
+            ->latest('start_time')
             ->first();
 
-        if ($lastScreenshot) {
-            $adjustedTime = Carbon::parse($lastScreenshot->created_at);
-            $openSession->end_time = $adjustedTime;
-            $openSession->end_date = $adjustedTime->toDateString();
-        } else {
-            $openSession->end_time = Carbon::now();
-            $openSession->end_date = Carbon::now()->toDateString();
+        // 3. Close the previous open session (if exists)
+        if ($openSession) {
+            $lastScreenshot = Screenshot::where('session_id', $openSession->id)
+                ->latest('created_at')
+                ->first();
+
+            if ($lastScreenshot) {
+                $adjustedTime = Carbon::parse($lastScreenshot->created_at);
+                $openSession->end_time = $adjustedTime;
+                $openSession->end_date = $adjustedTime->toDateString();
+            } else {
+                $openSession->end_time = Carbon::now();
+                $openSession->end_date = Carbon::now()->toDateString();
+            }
+
+            $openSession->save();
         }
 
-        $openSession->save();
+        // 4. Start a new session
+        $newSession = new WorkSession();
+        $newSession->user_id = $userId;
+        $newSession->task_id = $request->task_id;
+        $newSession->memo_content = $request->memo_content;
+        $newSession->start_time = $now;
+        $newSession->start_date = $now->toDateString();
+        $newSession->save();
+
+        return response()->json([
+            'message' => 'Work session started successfully. Previous session closed if it was open.',
+            'work_session' => $newSession
+        ]);
     }
-
-    // 4. Start a new session
-    $newSession = new WorkSession();
-    $newSession->user_id = $userId;
-    $newSession->task_id = $request->task_id;
-    $newSession->memo_content = $request->memo_content;
-    $newSession->start_time = $now;
-    $newSession->start_date = $now->toDateString();
-    $newSession->save();
-
-    return response()->json([
-        'message' => 'Work session started successfully. Previous session closed if it was open.',
-        'work_session' => $newSession
-    ]);
-}
 
 
 
@@ -310,7 +319,7 @@ class WorkSessionController extends Controller
 
             // Calculate duration
             $start = Carbon::parse($openWindow->start_time);
-            $end   = Carbon::parse($sessionEndTime);
+            $end = Carbon::parse($sessionEndTime);
 
             $openWindow->duration_seconds = $start->diffInSeconds($end);
 
@@ -360,14 +369,25 @@ class WorkSessionController extends Controller
     }
 
 
+
+
     public function sessionHeartBeat(Request $request)
     {
         // ✅ Validate request
         $validator = Validator::make($request->all(), [
             'session_id' => 'required|exists:work_sessions,id',
             'type' => 'nullable|string|max:255',
+
+            // Optional activity chunks (NEW SYSTEM)
+            'activities' => 'nullable|array|max:500',
+            'activities.*.start_time' => 'required_with:activities|date',
+            'activities.*.end_time' => 'required_with:activities|date',
+            'activities.*.keyboard_clicks' => 'nullable|integer',
+            'activities.*.mouse_clicks' => 'nullable|integer',
+            'activities.*.is_idle' => 'nullable|boolean',
+            'activities.*.active_window_title' => 'nullable|string|max:255',
         ]);
-    
+
         if ($validator->fails()) {
             return response()->json([
                 'status' => false,
@@ -375,44 +395,99 @@ class WorkSessionController extends Controller
                 'errors' => $validator->errors(),
             ], 422);
         }
-    
-        // ✅ Fetch session
-        $session = WorkSession::find($request->session_id);
-    
-        // Safety check (rare)
-        if (!$session) {
+
+        DB::beginTransaction();
+
+        try {
+            // ✅ Fetch session
+            $session = WorkSession::find($request->session_id);
+
+            if (!$session) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Session not found',
+                ], 404);
+            }
+
+            // =====================================================
+            // 🔹 HEARTBEAT UPDATE (OLD SYSTEM SAFE)
+            // =====================================================
+            $updateData = [
+                'last_heartbeat' => now(),
+                'last_heartbeat_type' => $request->type ?? 'Active',
+            ];
+
+            // Reactivate session if it was ended
+            if (!is_null($session->end_date) || !is_null($session->end_time)) {
+                $updateData['end_date'] = null;
+                $updateData['end_time'] = null;
+            }
+
+            $session->update($updateData);
+
+            // =====================================================
+            // 🔥 ACTIVITY LOGGING (NEW SYSTEM)
+            // =====================================================
+            if (!empty($request->activities)) {
+
+                $insertData = [];
+
+                foreach ($request->activities as $activity) {
+                    $insertData[] = [
+                        'employee_id' => Auth::user()->id,
+                        'session_id' => $session->id,
+
+                        'start_time' => $activity['start_time'],
+                        'end_time' => $activity['end_time'],
+
+                        'keyboard_clicks' => $activity['keyboard_clicks'] ?? 0,
+                        'mouse_clicks' => $activity['mouse_clicks'] ?? 0,
+
+                        'is_idle' => $activity['is_idle'] ?? false,
+                        'active_window_title' => $activity['active_window_title'] ?? null,
+
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
+                }
+
+                // 🚀 Bulk insert for performance
+                ActivityLog::insert($insertData);
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Heartbeat processed successfully',
+                'data' => [
+                    'session_id' => $session->id,
+                    'activity_logged' => !empty($request->activities),
+                    'chunks_received' => count($request->activities ?? []),
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+
             return response()->json([
                 'status' => false,
-                'message' => 'Session not found',
-            ], 404);
+                'message' => 'Something went wrong',
+                'error' => $e->getMessage(),
+            ], 500);
         }
-    
-        // ✅ Prepare update data
-        $updateData = [
-            'last_heartbeat' => now(),
-            'last_heartbeat_type' => $request->type ?? 'Active',
-        ];
-    
-        // 🔥 Reactivate session if already ended
-        if (!is_null($session->end_date) || !is_null($session->end_time)) {
-            $updateData['end_date'] = null;
-            $updateData['end_time'] = null;
-        }
-    
-        // ✅ Update session
-        $session->update($updateData);
-    
-        return response()->json([
-            'status' => true,
-            'message' => 'Heartbeat updated successfully',
-            'data' => [
-                'session_id' => $session->id,
-                'last_heartbeat' => $session->last_heartbeat,
-                'last_heartbeat_type' => $session->last_heartbeat_type,
-                'reactivated' => isset($updateData['end_date']),
-            ],
-        ]);
     }
 
+    public function fetchActivityLogs($id)
+    {
+
+        $data = ActivityLog::where('request_id',$id)->get();
+
+         return response()->json([
+            'message' => 'Success',
+            'data' => $data
+        ]);
+
+    }
 
 }

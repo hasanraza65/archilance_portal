@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use App\Models\User;
 use App\Services\OneDriveService;
+use GuzzleHttp\Client;
 
 
 class ChatController extends Controller
@@ -22,31 +23,33 @@ class ChatController extends Controller
         $request->validate([
             'receiver_id'   => 'required|exists:users,id',
             'message'       => 'nullable|string',
-            'attachments.*' => 'nullable|file|max:10240', // 10MB
+            'attachments.*' => 'nullable|file|max:10240',
         ]);
-
+    
+        $senderId = Auth::id();
+    
         $chat = Chat::create([
-            'sender_id'   => Auth::id(),
+            'sender_id'   => $senderId,
             'receiver_id' => $request->receiver_id,
             'message'     => $request->message,
-            'reply_to' => $request->reply_to
+            'reply_to'    => $request->reply_to
         ]);
-
+    
         // Handle attachments
         if ($request->hasFile('attachments')) {
+    
             foreach ($request->file('attachments') as $file) {
-
+    
                 $path = 'chat_attachments/' . $chat->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
-
-                // Upload to OneDrive
+    
                 app(OneDriveService::class)->upload(
                     $path,
                     file_get_contents($file->getRealPath())
                 );
-
+    
                 ChatAttachment::create([
                     'chat_id'   => $chat->id,
-                    'user_id'   => Auth::id(),
+                    'user_id'   => $senderId,
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
                     'file_size' => $file->getSize(),
@@ -54,34 +57,200 @@ class ChatController extends Controller
                 ]);
             }
         }
-        
-        
-         //send email 
-
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Intelligent Email Notification Logic
+        |--------------------------------------------------------------------------
+        */
+    
         $receiver = User::find($request->receiver_id);
-
-        $receiver_email = $receiver->email;
-        $receiver_name = $receiver->name;
-        $sender_name = Auth::user()->name;
-        $message_text = $request->message;
-
-        \Mail::send(
-            'mails.new-message',
-            compact(['message_text']),
-            function ($message) use ($receiver_email, $receiver_name, $sender_name) {
-
-
-                $message
-                    ->from("info@archilance.net", $sender_name)
-                    ->to($receiver_email)
-                    ->subject($sender_name.' messaged you - Archilance LLC');  // Attach the PDF file
+        $shouldSendEmail = true;
+    
+        // 1️⃣ Check if unread messages already exist
+        $unreadExists = Chat::where('sender_id', $senderId)
+            ->where('receiver_id', $receiver->id)
+            ->whereHas('readStatus', function ($q) use ($receiver) {
+                $q->where('receiver_id', $receiver->id)
+                  ->where('is_read', false);
+            })
+            ->exists();
+    
+        if ($unreadExists) {
+            $shouldSendEmail = false;
+        }
+    
+        // 2️⃣ Check if receiver is online (optional but good)
+        if ($receiver->last_seen && \Carbon\Carbon::parse($receiver->last_seen)->diffInMinutes(now()) < 2) {
+            $shouldSendEmail = false;
+        }
+    
+        // 3️⃣ Prevent multiple emails in short time
+        if ($receiver->last_message_email_sent_at) {
+    
+            $minutes = \Carbon\Carbon::parse($receiver->last_message_email_sent_at)
+                ->diffInMinutes(now());
+    
+            if ($minutes < 10) {
+                $shouldSendEmail = false;
             }
+        }
+    
+        // Send email
+        /*
+        if ($shouldSendEmail) {
+    
+            $receiver_email = $receiver->email;
+            $sender_name    = Auth::user()->name;
+            $message_text   = $request->message;
+    
+            \Mail::send(
+                'mails.new-message',
+                compact('message_text'),
+                function ($message) use ($receiver_email, $sender_name) {
+    
+                    $message
+                        ->from("info@archilance.net", $sender_name)
+                        ->to($receiver_email)
+                        ->subject($sender_name . ' messaged you - Archilance LLC');
+                }
+            );
+        } */
+        
+         /*
+        |--------------------------------------------------------------------------
+        | Send Push Notification (FCM)
+        |--------------------------------------------------------------------------
+        */
+        
+        
+        
+        if (!empty($receiver->fcm_token)) {
+        
+            $senderName = Auth::user()->name;
+        
+            $title = "New Message from {$senderName}";
+            $body  = $request->message 
+                        ? $request->message 
+                        : "📎 Sent you an attachment";
+        
+            $this->sendFcmNotification($receiver->fcm_token, $title, $body);
+        }
+
+        // Update last email sent time
+        $receiver->update([
+            'last_message_email_sent_at' => now()
+        ]);
+    
+        return response()->json([
+            'message' => 'Message sent.',
+            'chat' => $chat->load('attachments')
+        ]);
+    }
+
+
+    protected function sendFcmNotification($token, $title, $body, $dataPayload = [])
+{
+    try {
+
+        \Log::info('FCM START');
+
+        $serviceAccountPath = storage_path('firebase/firebase-key.json');
+        $jsonKey = json_decode(file_get_contents($serviceAccountPath), true);
+
+        $client = new Client();
+
+        /*
+        |--------------------------------------------------------------------------
+        | 1. Generate OAuth Token
+        |--------------------------------------------------------------------------
+        */
+        $now = time();
+        $jwtHeader = base64_encode(json_encode([
+            'alg' => 'RS256',
+            'typ' => 'JWT'
+        ]));
+
+        $jwtClaim = base64_encode(json_encode([
+            'iss' => $jsonKey['client_email'],
+            'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
+            'aud' => 'https://oauth2.googleapis.com/token',
+            'exp' => $now + 3600,
+            'iat' => $now
+        ]));
+
+        $unsignedJwt = $jwtHeader . '.' . $jwtClaim;
+
+        openssl_sign($unsignedJwt, $signature, $jsonKey['private_key'], 'sha256');
+        $jwt = $unsignedJwt . '.' . base64_encode($signature);
+
+        $response = $client->post('https://oauth2.googleapis.com/token', [
+            'form_params' => [
+                'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                'assertion' => $jwt,
+            ]
+        ]);
+
+        $accessToken = json_decode((string) $response->getBody(), true)['access_token'];
+
+        \Log::info('FCM TOKEN GENERATED');
+
+        /*
+        |--------------------------------------------------------------------------
+        | 2. Send Notification
+        |--------------------------------------------------------------------------
+        */
+
+        $projectId = $jsonKey['project_id'];
+
+        $fcmResponse = $client->post(
+            "https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send",
+            [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $accessToken,
+                    'Content-Type'  => 'application/json',
+                ],
+                'json' => [
+                    'message' => [
+                        'token' => $token,
+                
+                        'notification' => [
+                            'title' => $title,
+                            'body'  => $body,
+                        ],
+                
+                        'android' => [
+                            'notification' => [
+                                'channel_id' => 'archilance_notification_channel',
+                                'sound' => 'notification_sound',
+                            ],
+                        ],
+                
+                        // 👇 ADD THIS FOR iOS
+                        'apns' => [
+                            'payload' => [
+                                'aps' => [
+                                    'sound' => 'notification_sound.wav', // 👈 MUST include extension
+                                ],
+                            ],
+                        ],
+                
+                        'data' => array_merge([
+                            'type' => 'chat',
+                        ], $dataPayload),
+                    ]
+                ]
+            ]
         );
 
-        //ending send email
+        \Log::info('FCM SENT SUCCESS', [
+            'response' => (string) $fcmResponse->getBody()
+        ]);
 
-        return response()->json(['message' => 'Message sent.', 'chat' => $chat->load('attachments')]);
+    } catch (\Exception $e) {
+        \Log::error('FCM ERROR: ' . $e->getMessage());
     }
+}
 
     // Update message
     public function update(Request $request, $id)

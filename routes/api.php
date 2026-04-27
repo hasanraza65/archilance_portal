@@ -123,6 +123,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
 
+        Route::get('/all-tasks-chats', [App\Http\Controllers\API\admin\TaskCommentController::class, 'allTasksChats']);
+
+
+        Route::post('/update-joining-date', [UserManagementController::class, 'updateJoiningDate']);
+
+        Route::get('/fetch-activity-logs/{id}', [App\Http\Controllers\API\employee\WorkSessionController::class, 'fetchActivityLogs']);
+
+
     });
 
 
@@ -192,6 +200,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     Route::prefix('employee')->middleware('role:3')->group(function () {
+
+        Route::get('/stats', [App\Http\Controllers\API\DashboardController::class, 'employeeStats']);
+
 
         //Project with tasks and comments Module
 
@@ -301,6 +312,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
         Route::get('/all-project-tasks', [App\Http\Controllers\API\employee\ProjectTaskController::class, 'allTasks']);
+
+        Route::get('/all-tasks-chats', [App\Http\Controllers\API\employee\TaskCommentController::class, 'allTasksChats']);
+
+        Route::get('/fetch-activity-logs/{id}', [App\Http\Controllers\API\employee\WorkSessionController::class, 'fetchActivityLogs']);
 
     });
 

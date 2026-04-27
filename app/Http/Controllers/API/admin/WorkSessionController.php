@@ -66,6 +66,17 @@ class WorkSessionController extends Controller
         $time_strings_hr = [];
 
         foreach ($sessions as $session) {
+
+            if (Auth::check() && !in_array(Auth::user()->user_role, [1,2])) {
+                if ($session->screenshots) {
+                    foreach ($session->screenshots as $shot) {
+                        if (!empty($shot->emp_screenshot_file)) {
+                            $shot->screenshot_file = $shot->emp_screenshot_file;
+                        }
+                    }
+                }
+            }
+
             $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
             
             if (is_null($session->end_time)) {

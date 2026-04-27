@@ -11,6 +11,13 @@ use App\Models\SessionTimeAdjustment;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 
+use Illuminate\Support\Facades\Storage;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Gd\Driver;
+
+use Illuminate\Support\Str;
+
+
 class ScreenshotController extends Controller
 {
 
@@ -18,12 +25,14 @@ class ScreenshotController extends Controller
     {
         $userId = Auth::id();
         
+       // \Log::info('window title '.$request->window_title);
+        
         //\Log::info('screenshot time '.Carbon::now());
     
         // 1. Check if a session exists for today with null end_time
-        $currentSession = WorkSession::whereDate('start_time', Carbon::today())
+        $currentSession = WorkSession::where('user_id', $userId)
             ->whereNull('end_time')
-            ->where('user_id', $userId)
+            ->latest('start_time')
             ->first();
     
         // 2. If no session found, handle older open sessions + create new one
@@ -58,17 +67,46 @@ class ScreenshotController extends Controller
         }
     
         // 4. Store Screenshot
-        $screenshot = new Screenshot();
-    
         if ($request->hasFile('screenshot_image')) {
-            $path = $request->file('screenshot_image')->store('uploads/screenshots', 'public');
+
+            $file = $request->file('screenshot_image');
+        
+            // store original image
+            $path = $file->store('uploads/screenshots', 'public');
+        
+            $screenshot = new Screenshot();
+        
             $screenshot->screenshot_file = $path;
+        
+            if (isset($request->window_title) && Str::contains($request->window_title, 'WhatsApp')) {
+        
+                // create manager
+                $manager = new ImageManager(new Driver());
+        
+                // read image
+                $image = $manager->read($file->getRealPath());
+        
+                // blur image
+                $image->blur(85);
+        
+                $blurPath = 'uploads/screenshots/blur_' . time() . '_' . $file->getClientOriginalName();
+        
+                Storage::disk('public')->put($blurPath, $image->encode());
+        
+                $screenshot->emp_screenshot_file = $blurPath;
+        
+            } else {
+        
+                $screenshot->emp_screenshot_file = $path;
+            }
+        
+            $screenshot->session_id = $currentSession->id;
+            $screenshot->created_at = Carbon::now();
+            $screenshot->user_id = $userId;
+            $screenshot->save();
         }
-    
-        $screenshot->session_id = $currentSession->id;
-        $screenshot->created_at = Carbon::now();
-        $screenshot->user_id = $userId;
-        $screenshot->save();
+        
+        //ending storing images
     
         return response()->json([
             'message' => 'Screenshot added successfully. Idle time (if active) was closed.',
@@ -152,92 +190,109 @@ class ScreenshotController extends Controller
 
 
    public function upsertIdleTime(Request $request)
-{
-    $request->validate([
-        'session_id' => 'required|exists:work_sessions,id',
-    ]);
-
-    $now = Carbon::now();
-    $sessionId = $request->session_id;
-
-    // 1️⃣ Check if there's already an open idle record
-    $openAdjustment = SessionTimeAdjustment::where('session_id', $sessionId)
+    {
+        $request->validate([
+            'session_id' => 'required|exists:work_sessions,id',
+        ]);
+    
+        $now = Carbon::now();
+        $sessionId = $request->session_id;
+    
+        // 1️⃣ Check if there's already an open idle record
+        $openAdjustment = SessionTimeAdjustment::where('session_id', $sessionId)
+            ->whereNull('end_time')
+            ->first();
+    
+        if ($openAdjustment) {
+            // Close the idle period
+            $openAdjustment->end_time = $now;
+            $openAdjustment->save();
+    
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Idle period closed.',
+                'data' => $openAdjustment
+            ]);
+        }
+    
+        // 2️⃣ Fetch the most recent idle period (if any)
+        $lastIdle = SessionTimeAdjustment::where('session_id', $sessionId)
+            ->whereNotNull('end_time')
+            ->latest('end_time')
+            ->first();
+    
+        // 3️⃣ Define thresholds
+        $minGapBetweenIdles = 20; // minutes (minimum time gap before logging another idle)
+        $ignoreSmallBreaksIfWorkedLong = 10; // minutes (if idle < this, skip it)
+        $longWorkThreshold = 60; // minutes (if user worked > this, ignore small idles)
+    
+        $session = WorkSession::find($sessionId);
+        
+        // Ensure session start time is Carbon instance
+        $sessionStart = $session->start_time ? Carbon::parse($session->start_time) : null;
+    
+        $shouldCreateIdle = true;
+    
+        if ($lastIdle) {
+            // Ensure end_time is Carbon instance
+            $lastIdleEndTime = Carbon::parse($lastIdle->end_time);
+            $minutesSinceLastIdle = $lastIdleEndTime->diffInMinutes($now);
+    
+            // 🕒 Skip if new idle happens too soon after previous one
+            if ($minutesSinceLastIdle < $minGapBetweenIdles) {
+                $shouldCreateIdle = false;
+            }
+        }
+    
+        // ⏱ Check how long the user was working continuously before this idle
+        if ($sessionStart) {
+            // Ensure lastActivity is a Carbon instance
+            $lastActivity = $lastIdle ? Carbon::parse($lastIdle->end_time) : $sessionStart;
+            $workedMinutes = $lastActivity->diffInMinutes($now);
+    
+            // If worked for a long time, ignore tiny idle gaps (e.g., 5–6 min)
+            if ($workedMinutes >= $longWorkThreshold && $workedMinutes <= ($longWorkThreshold + $ignoreSmallBreaksIfWorkedLong)) {
+                $shouldCreateIdle = false;
+            }
+        }
+    
+        if (! $shouldCreateIdle) {
+            return response()->json([
+                'status' => 'skipped',
+                'message' => 'Idle period skipped due to recent activity or short gap.',
+            ]);
+        }
+        
+        $overlapExists = SessionTimeAdjustment::where('session_id', $sessionId)
+        ->whereNotNull('end_time')
+        ->where('start_time', '<=', $now)
+        ->where('end_time', '>=', $now)
+        ->exists();
+        
+        $openExists = SessionTimeAdjustment::where('session_id', $sessionId)
         ->whereNull('end_time')
-        ->first();
-
-    if ($openAdjustment) {
-        // Close the idle period
-        $openAdjustment->end_time = $now;
-        $openAdjustment->save();
-
+        ->exists();
+        
+        if (! $shouldCreateIdle || $overlapExists || $openExists) {
+            return response()->json([
+                'status' => 'skipped',
+                'message' => 'Idle skipped due to overlap or existing open idle.',
+            ]);
+        }
+    
+        // 4️⃣ Create a new idle period
+        $newAdjustment = SessionTimeAdjustment::create([
+            'session_id' => $sessionId,
+            'start_time' => $now,
+            'end_time' => null,
+        ]);
+    
         return response()->json([
             'status' => 'success',
-            'message' => 'Idle period closed.',
-            'data' => $openAdjustment
+            'message' => 'Idle period started.',
+            'data' => $newAdjustment
         ]);
     }
-
-    // 2️⃣ Fetch the most recent idle period (if any)
-    $lastIdle = SessionTimeAdjustment::where('session_id', $sessionId)
-        ->whereNotNull('end_time')
-        ->latest('end_time')
-        ->first();
-
-    // 3️⃣ Define thresholds
-    $minGapBetweenIdles = 20; // minutes (minimum time gap before logging another idle)
-    $ignoreSmallBreaksIfWorkedLong = 10; // minutes (if idle < this, skip it)
-    $longWorkThreshold = 60; // minutes (if user worked > this, ignore small idles)
-
-    $session = WorkSession::find($sessionId);
-    
-    // Ensure session start time is Carbon instance
-    $sessionStart = $session->start_time ? Carbon::parse($session->start_time) : null;
-
-    $shouldCreateIdle = true;
-
-    if ($lastIdle) {
-        // Ensure end_time is Carbon instance
-        $lastIdleEndTime = Carbon::parse($lastIdle->end_time);
-        $minutesSinceLastIdle = $lastIdleEndTime->diffInMinutes($now);
-
-        // 🕒 Skip if new idle happens too soon after previous one
-        if ($minutesSinceLastIdle < $minGapBetweenIdles) {
-            $shouldCreateIdle = false;
-        }
-    }
-
-    // ⏱ Check how long the user was working continuously before this idle
-    if ($sessionStart) {
-        // Ensure lastActivity is a Carbon instance
-        $lastActivity = $lastIdle ? Carbon::parse($lastIdle->end_time) : $sessionStart;
-        $workedMinutes = $lastActivity->diffInMinutes($now);
-
-        // If worked for a long time, ignore tiny idle gaps (e.g., 5–6 min)
-        if ($workedMinutes >= $longWorkThreshold && $workedMinutes <= ($longWorkThreshold + $ignoreSmallBreaksIfWorkedLong)) {
-            $shouldCreateIdle = false;
-        }
-    }
-
-    if (! $shouldCreateIdle) {
-        return response()->json([
-            'status' => 'skipped',
-            'message' => 'Idle period skipped due to recent activity or short gap.',
-        ]);
-    }
-
-    // 4️⃣ Create a new idle period
-    $newAdjustment = SessionTimeAdjustment::create([
-        'session_id' => $sessionId,
-        'start_time' => $now,
-        'end_time' => null,
-    ]);
-
-    return response()->json([
-        'status' => 'success',
-        'message' => 'Idle period started.',
-        'data' => $newAdjustment
-    ]);
-}
 
 
      public function deleteIdleTime(Request $request){

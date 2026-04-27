@@ -39,12 +39,21 @@ class UserManagementController extends Controller
         $roleId = $this->getRoleFromRequest($request);
         $user = Auth::user();
 
-        $users = User::where(function ($query) use ($roleId) {
-            $query->where('user_role', $roleId)
-                ->where('employee_type', '!=', 'Manager');
-        })
-            ->orWhere('id', $user->id) // ✅ include the logged-in user
-            ->get();
+        if ($user->employee_type !== "Executive") {
+            // Non-Executives: see role users but exclude Managers
+            $users = User::where(function ($query) use ($roleId) {
+                $query->where('user_role', $roleId)
+                    ->where('employee_type', '!=', 'Manager');
+            })
+                ->orWhere('id', $user->id) // include logged-in user
+                ->get();
+        } else {
+            // Executives: see role users including Managers
+            $users = User::where('user_role', $roleId)
+                ->orWhere('id', $user->id) // include logged-in user
+                ->get();
+        }
+
 
         return response()->json($users);
     }

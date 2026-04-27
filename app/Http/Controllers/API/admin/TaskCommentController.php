@@ -5,6 +5,7 @@ namespace App\Http\Controllers\api\admin;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\TaskComment;
+use App\Models\ProjectTask;
 use App\Models\TaskCommentAttachment;
 use App\Models\TaskCommentReadStatus;
 use Auth;
@@ -254,5 +255,41 @@ class TaskCommentController extends Controller
         }
 
         return response()->json(['message' => 'All comments marked as read']);
+    }
+
+    public function allTasksChats()
+    {
+        // 🔹 Internal chats
+        $internalTasks = ProjectTask::with([
+                'latestInternalComment.sender',
+                'latestInternalComment.commentAttachments'
+            ])
+            ->whereHas('comments', function ($q) {
+                $q->where('allowed_customer', 0);
+            })
+            ->withMax(['comments as internal_comments_max_created_at' => function ($q) {
+                $q->where('allowed_customer', 0);
+            }], 'created_at')
+            ->orderByDesc('internal_comments_max_created_at')
+            ->get();
+
+        // 🔹 Customer chats
+        $customerTasks = ProjectTask::with([
+                'latestCustomerComment.sender',
+                'latestCustomerComment.commentAttachments'
+            ])
+            ->whereHas('comments', function ($q) {
+                $q->where('allowed_customer', 1);
+            })
+            ->withMax(['comments as customer_comments_max_created_at' => function ($q) {
+                $q->where('allowed_customer', 1);
+            }], 'created_at')
+            ->orderByDesc('customer_comments_max_created_at')
+            ->get();
+
+        return response()->json([
+            'internal_tasks' => $internalTasks,
+            'customer_tasks' => $customerTasks,
+        ]);
     }
 }

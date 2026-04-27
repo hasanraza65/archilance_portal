@@ -25,20 +25,46 @@ class DashboardController extends Controller
 
     }
 
-    /*
-     public function employeeStats(){
+    
+    public function employeeStats()
+    {
+        $employeeId = Auth::id();
 
-        $total_projects = Project::where('customer_id',Auth::user()->id)->count();
-        $total_in_progress_projects = Project::where('customer_id',Auth::user()->id)->where('status','In Progress')->count();
-        $total_completed_projects = Project::where('customer_id',Auth::user()->id)->where('status','Completed')->count();
+        // Total Projects
+        $total_projects = Project::whereIn('id', function ($query) use ($employeeId) {
+            $query->select('project_id')
+                ->from('project_assignees')
+                ->where('employee_id', $employeeId);
+        })->count();
+
+        // In Progress Projects
+        $total_in_progress_projects = Project::where('status', 'In Progress')
+            ->whereIn('id', function ($query) use ($employeeId) {
+                $query->select('project_id')
+                    ->from('project_assignees')
+                    ->where('employee_id', $employeeId);
+            })->count();
+
+        // Completed Projects
+        $total_completed_projects = Project::where('status', 'Completed')
+            ->whereIn('id', function ($query) use ($employeeId) {
+                $query->select('project_id')
+                    ->from('project_assignees')
+                    ->where('employee_id', $employeeId);
+            })->count();
+
+        // Total Tasks
+        $total_tasks = \DB::table('task_assignees')
+            ->where('employee_id', $employeeId)
+            ->count();
 
         return response()->json([
             "total_projects" => $total_projects,
             "total_in_progress_projects" => $total_in_progress_projects,
-            "total_completed_projects" => $total_completed_projects
+            "total_completed_projects" => $total_completed_projects,
+            "total_tasks" => $total_tasks
         ]);
-
-    } */
+    }
 
 
     public function adminStats(){

@@ -35,89 +35,95 @@ class LeaveRequestController extends Controller
     }
 
     // View a specific leave request
-    public function show($id)
-    {
-        $leave = LeaveRequest::with('user')->findOrFail($id);
-        $userId = $leave->user_id;
+   public function show($id)
+{
+    $leave = LeaveRequest::with('user')->findOrFail($id);
+    $user = $leave->user;
+    $userId = $user->id;
 
-        // Determine current leave cycle (1 July → 30 June)
-        $today = now();
+    $today = now();
+
+    // Determine leave cycle
+    if ($user->joining_date) {
+        $join = Carbon::parse($user->joining_date);
+
+        // Calculate current cycle based on joining date anniversary
+        $yearDiff = $today->year - $join->year;
+        $cycleStart = $join->copy()->addYears($yearDiff);
+
+        // If cycle start is in the future, subtract one year
+        if ($cycleStart->gt($today)) {
+            $cycleStart->subYear();
+        }
+
+        $cycleEnd = $cycleStart->copy()->addYear()->subDay();
+    } else {
+        // Default static 1 July → 30 June
         if ($today->month >= 7) {
-            $cycleStart = $today->copy()->startOfYear()->addMonths(6)->startOfMonth(); // July 1
-            $cycleEnd   = $today->copy()->addYear()->startOfYear()->addMonths(6)->subDay(); // June 30 next year
+            $cycleStart = $today->copy()->startOfYear()->addMonths(6)->startOfMonth();
+            $cycleEnd   = $today->copy()->addYear()->startOfYear()->addMonths(6)->subDay();
         } else {
-            $cycleStart = $today->copy()->subYear()->startOfYear()->addMonths(6)->startOfMonth(); // July 1 last year
-            $cycleEnd   = $today->copy()->startOfYear()->addMonths(6)->subDay(); // June 30 this year
+            $cycleStart = $today->copy()->subYear()->startOfYear()->addMonths(6)->startOfMonth();
+            $cycleEnd   = $today->copy()->startOfYear()->addMonths(6)->subDay();
         }
-
-        // Get relevant leave requests for this user
-        $leaveRequests = LeaveRequest::where('user_id', $userId)
-            ->where('status', '!=', 'Rejected')
-            ->whereBetween('start_date', [$cycleStart, $cycleEnd])
-            ->get();
-
-        // Prepare summary array
-      $leaveSummary = [
-    'sick'   => 0,
-    'casual' => 0,
-    'annual' => 0,
-    'other'  => 0,
-];
-
-foreach ($leaveRequests as $req) {
-
-    $start = Carbon::parse($req->start_date);
-    $end   = Carbon::parse($req->end_date);
-
-    $days = 0;
-
-    while ($start->lte($end)) {
-        if (!in_array($start->dayOfWeek, [
-            CarbonInterface::SATURDAY,
-            CarbonInterface::SUNDAY
-        ])) {
-            $days++;
-        }
-        $start->addDay();
     }
 
-    // Normalize the type (case-insensitive)
-    $type = strtolower(trim($req->leave_type));
+    // Get relevant leave requests for this user (excluding rejected)
+    $leaveRequests = LeaveRequest::with('user')
+        ->where('user_id', $userId)
+        ->where('status', '!=', 'Rejected')
+        ->whereBetween('start_date', [$cycleStart, $cycleEnd])
+        ->get();
 
-    // Map types to your fixed labels
-    switch ($type) {
-        case 'sick':
-        case 'medical leave':     // ← added
-            $mapped = 'sick';
-            break;
+    // Prepare summary
+    $leaveSummary = [
+        'sick'   => 0,
+        'casual' => 0,
+        'annual' => 0,
+        'other'  => 0,
+    ];
 
-        case 'casual':
-            $mapped = 'casual';
-            break;
+    foreach ($leaveRequests as $req) {
+        $start = Carbon::parse($req->start_date);
+        $end   = Carbon::parse($req->end_date);
 
-        case 'annual':
-            $mapped = 'annual';
-            break;
+        $days = 0;
+        while ($start->lte($end)) {
+            if (!in_array($start->dayOfWeek, [CarbonInterface::SATURDAY, CarbonInterface::SUNDAY])) {
+                $days++;
+            }
+            $start->addDay();
+        }
 
-        default:
-            $mapped = 'casual'; // Any other type becomes casual
-            break;
+        $type = strtolower(trim($req->leave_type));
+        switch ($type) {
+            case 'sick':
+            case 'medical leave':
+                $mapped = 'sick';
+                break;
+            case 'casual':
+                $mapped = 'casual';
+                break;
+            case 'annual':
+                $mapped = 'annual';
+                break;
+            default:
+                $mapped = 'other';
+                break;
+        }
+
+        $leaveSummary[$mapped] += $days;
     }
 
-    // Add the days
-    $leaveSummary[$mapped] += $days;
+    return response()->json([
+        'data' => $leave,           // keep the same leave object with user
+        'leave_summary' => $leaveSummary,
+        'cycle' => [
+            'start' => $cycleStart->toDateString(),
+            'end'   => $cycleEnd->toDateString(),
+        ]
+    ]);
 }
-
-
-        return response()->json([
-            'data' => $leave,
-            'leave_summary' => $leaveSummary,
-            'cycle' => [
-                'start' => $cycleStart->toDateString(),
-                'end'   => $cycleEnd->toDateString(),
-            ]
-        ]);
-    }
 
 
 
