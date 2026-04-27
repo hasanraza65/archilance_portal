@@ -53,4 +53,18 @@ class ProjectTask extends Model
         return $this->hasMany(Note::class, 'project_id')
                     ->where('type', 'task');
     }
+
+    public function latestInternalComment()
+    {
+        return $this->hasOne(TaskComment::class, 'task_id')
+                    ->where('allowed_customer', 0)
+                    ->latestOfMany();
+    }
+
+    public function latestCustomerComment()
+    {
+        return $this->hasOne(TaskComment::class, 'task_id')
+                    ->where('allowed_customer', 1)
+                    ->latestOfMany();
+    }
 }

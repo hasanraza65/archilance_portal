@@ -27,12 +27,12 @@ class NoteController extends Controller
     /**
      * Store a newly created note
      */
-    public function store(Request $request)
+   public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'project_id' => 'nullable|integer',
-            'type' => 'nullable|string',
-            'note_text'  => 'required|string',
+            'type'       => 'nullable|string',
+            'note_text'  => 'required', // we’ll validate inside
         ]);
 
         if ($validator->fails()) {
@@ -42,12 +42,44 @@ class NoteController extends Controller
             ], 422);
         }
 
+        $userId = Auth::user()->id;
+
+        // ✅ If note_text is array (multiple notes)
+        if (is_array($request->note_text)) {
+
+            $notesData = [];
+
+            foreach ($request->note_text as $text) {
+                if (!empty($text)) {
+                    $notesData[] = [
+                        'user_id'    => $userId,
+                        'project_id' => $request->project_id,
+                        'note_text'  => $text,
+                        'status'     => 0,
+                        'type'       => $request->type,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
+                }
+            }
+
+            // Bulk insert
+            Note::insert($notesData);
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Notes created successfully',
+                'count' => count($notesData)
+            ], 201);
+        }
+
+        // ✅ Single note (existing behavior)
         $note = Note::create([
-            'user_id'    => Auth::user()->id,
+            'user_id'    => $userId,
             'project_id' => $request->project_id,
             'note_text'  => $request->note_text,
             'status'     => 0,
-            'type' => $request->type
+            'type'       => $request->type
         ]);
 
         return response()->json([
