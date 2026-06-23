@@ -85,4 +85,18 @@ class ProjectTask extends Model
             ->where('is_pinned', 1)
             ->latest();
     }
+
+    public function latestInternalComment()
+    {
+        return $this->hasOne(TaskComment::class, 'task_id')
+                    ->where('allowed_customer', 0)
+                    ->latestOfMany();
+    }
+
+    public function latestCustomerComment()
+    {
+        return $this->hasOne(TaskComment::class, 'task_id')
+                    ->where('allowed_customer', 1)
+                    ->latestOfMany();
+    }
 }

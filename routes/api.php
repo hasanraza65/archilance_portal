@@ -335,6 +335,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/fetch-activity-logs/{id}', [App\Http\Controllers\API\employee\WorkSessionController::class, 'fetchActivityLogs']);
 
+        Route::get('/all-tasks-chats', [App\Http\Controllers\API\employee\TaskCommentController::class, 'allTasksChats']);
+
+        Route::get('/fetch-activity-logs/{id}', [App\Http\Controllers\API\employee\WorkSessionController::class, 'fetchActivityLogs']);
+
     });
 
 

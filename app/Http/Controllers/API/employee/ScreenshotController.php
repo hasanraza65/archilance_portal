@@ -18,6 +18,13 @@ use Intervention\Image\Drivers\Gd\Driver;
 use Illuminate\Support\Str;
 
 
+use Illuminate\Support\Facades\Storage;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Gd\Driver;
+
+use Illuminate\Support\Str;
+
+
 class ScreenshotController extends Controller
 {
 
@@ -34,7 +41,9 @@ class ScreenshotController extends Controller
 
         // 1. Check if a session exists for today with null end_time
         $currentSession = WorkSession::where('user_id', $userId)
+        $currentSession = WorkSession::where('user_id', $userId)
             ->whereNull('end_time')
+            ->latest('start_time')
             ->latest('start_time')
             ->first();
 

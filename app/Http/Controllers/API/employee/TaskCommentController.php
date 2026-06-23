@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 
 use App\Models\TaskComment;
+use App\Models\ProjectTask;
 use App\Models\TaskCommentAttachment;
 use App\Models\TaskCommentReadStatus;
 use Auth;
