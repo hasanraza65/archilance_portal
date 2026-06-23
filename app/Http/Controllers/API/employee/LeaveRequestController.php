@@ -15,7 +15,10 @@ class LeaveRequestController extends Controller
 {
     // List all leave requests of the logged-in employee
     public function index()
+    public function index()
 {
+    $user = Auth::user();
+    $userId = $user->id;
     $user = Auth::user();
     $userId = $user->id;
 
@@ -47,15 +50,45 @@ class LeaveRequestController extends Controller
             $cycleStart = $today->copy()->subYear()->startOfYear()->addMonths(6)->startOfMonth();
             $cycleEnd = $today->copy()->startOfYear()->addMonths(6)->subDay();
         }
+
+    // Determine leave cycle
+    if ($user->joining_date) {
+        // If user has a joining date
+        $join = Carbon::parse($user->joining_date);
+
+        // Calculate the current cycle based on joining date
+        $yearDiff = $today->year - $join->year;
+        $cycleStart = $join->copy()->addYears($yearDiff);
+
+        // If cycle start is in the future, subtract one year
+        if ($cycleStart->gt($today)) {
+            $cycleStart->subYear();
+        }
+
+        // Cycle end is one year after start, minus one day
+        $cycleEnd = $cycleStart->copy()->addYear()->subDay();
+
+    } else {
+        // Fallback: default static cycle 1 July → 30 June
+        if ($today->month >= 7) {
+            $cycleStart = $today->copy()->startOfYear()->addMonths(6)->startOfMonth();
+            $cycleEnd = $today->copy()->addYear()->startOfYear()->addMonths(6)->subDay();
+        } else {
+            $cycleStart = $today->copy()->subYear()->startOfYear()->addMonths(6)->startOfMonth();
+            $cycleEnd = $today->copy()->startOfYear()->addMonths(6)->subDay();
+        }
     }
 
+    // Fetch all leave requests within this cycle
     // Fetch all leave requests within this cycle
     $leaveRequests = LeaveRequest::where('user_id', $userId)
         ->whereBetween('start_date', [$cycleStart, $cycleEnd])
         ->get();
 
     // Type summary (only count approved/pending)
+    // Type summary (only count approved/pending)
     $typeCounts = [
+        'sick' => 0,
         'sick' => 0,
         'casual' => 0,
         'annual' => 0,
@@ -63,8 +96,10 @@ class LeaveRequestController extends Controller
 
     foreach ($leaveRequests as $req) {
         if ($req->status === 'Rejected') continue;
+        if ($req->status === 'Rejected') continue;
 
         $start = Carbon::parse($req->start_date);
+        $end = Carbon::parse($req->end_date);
         $end = Carbon::parse($req->end_date);
         $days = 0;
 
@@ -94,10 +129,13 @@ class LeaveRequestController extends Controller
     }
 
     // Status counts
+    // Status counts
     $counts = [
+        'total' => LeaveRequest::where('user_id', $userId)->count(),
         'total' => LeaveRequest::where('user_id', $userId)->count(),
         'approved' => LeaveRequest::where('user_id', $userId)->where('status', 'Approved')->count(),
         'rejected' => LeaveRequest::where('user_id', $userId)->where('status', 'Rejected')->count(),
+        'pending' => LeaveRequest::where('user_id', $userId)->where('status', 'Pending')->count(),
         'pending' => LeaveRequest::where('user_id', $userId)->where('status', 'Pending')->count(),
     ];
 
@@ -106,7 +144,12 @@ class LeaveRequestController extends Controller
         'counts' => $counts,
         'data' => $leaveRequests,
         'cycle' => [
+        'types' => $typeCounts,
+        'counts' => $counts,
+        'data' => $leaveRequests,
+        'cycle' => [
             'start' => $cycleStart->toDateString(),
+            'end' => $cycleEnd->toDateString(),
             'end' => $cycleEnd->toDateString(),
         ]
     ]);
@@ -115,6 +158,13 @@ class LeaveRequestController extends Controller
 
     // Submit a new leave request
     public function store(Request $request)
+    {
+        $request->validate([
+            'leave_type' => 'required|in:sick,casual,annual',
+            'reason' => 'nullable|string',
+            'start_date' => 'required|date',
+            'end_date' => 'required|date|after_or_equal:start_date',
+        ]);
     {
         $request->validate([
             'leave_type' => 'required|in:sick,casual,annual',
@@ -133,6 +183,10 @@ class LeaveRequestController extends Controller
         $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
             ->filter(fn($date) => !$date->isWeekend())
             ->count();
+        // Calculate number of weekdays (Mon-Fri) applied for
+        $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
+            ->filter(fn($date) => !$date->isWeekend())
+            ->count();
 
         // Leave limits
         $limits = [
@@ -140,7 +194,19 @@ class LeaveRequestController extends Controller
             'annual' => 10,
             'sick' => 8,
         ];
+        // Leave limits
+        $limits = [
+            'casual' => 10,
+            'annual' => 10,
+            'sick' => 8,
+        ];
 
+        // Check consecutive rule for casual leave (weekdays only)
+        if ($leaveType === 'casual' && $daysRequested > 2) {
+            return response()->json([
+                'message' => 'Casual leaves cannot be taken for more than 2 consecutive weekdays.'
+            ], 422);
+        }
         // Check consecutive rule for casual leave (weekdays only)
         if ($leaveType === 'casual' && $daysRequested > 2) {
             return response()->json([
@@ -194,9 +260,25 @@ class LeaveRequestController extends Controller
             'end_date' => $endDate,
             'status' => 'Pending',
         ]);
+        // Create the leave
+        $leave = LeaveRequest::create([
+            'user_id' => $userId,
+            'leave_type' => $leaveType,
+            'reason' => $request->reason,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'status' => 'Pending',
+        ]);
 
         $sender_name = Auth::user()->name;
+        $sender_name = Auth::user()->name;
 
+        // Fixed emails
+        $fixedEmails = [
+            'Faran@archilance.net',
+            'info@archilance.net',
+            'HR@archilance.net'
+        ];
         // Fixed emails
         $fixedEmails = [
             'Faran@archilance.net',
@@ -209,17 +291,34 @@ class LeaveRequestController extends Controller
             ->orWhere('employee_type', 'Executive')
             ->pluck('email')
             ->toArray();
+        // Get all managers and executives
+        $all_managers = User::where('employee_type', 'Manager')
+            ->orWhere('employee_type', 'Executive')
+            ->pluck('email')
+            ->toArray();
 
+        // Merge fixed emails with managers
+        $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
         // Merge fixed emails with managers
         $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
 
         // Send email
         \Mail::send('mails.new-leave-request', compact('sender_name', 'leaveType', 'endDate', 'startDate'), function ($message) use ($sender_name, $allEmails) {
             $message->from("info@archilance.net", $sender_name)
+        // Send email
+        \Mail::send('mails.new-leave-request', compact('sender_name', 'leaveType', 'endDate', 'startDate'), function ($message) use ($sender_name, $allEmails) {
+            $message->from("info@archilance.net", $sender_name)
                 ->to($allEmails)
                 ->subject($sender_name . ' request for leaves - Archilance LLC');
         });
+                ->subject($sender_name . ' request for leaves - Archilance LLC');
+        });
 
+        return response()->json([
+            'message' => 'Leave request submitted successfully.',
+            'data' => $leave
+        ]);
+    }
         return response()->json([
             'message' => 'Leave request submitted successfully.',
             'data' => $leave
@@ -319,7 +418,16 @@ class LeaveRequestController extends Controller
     public function update(Request $request, $id)
     {
         $leave = LeaveRequest::where('user_id', Auth::id())->findOrFail($id);
+    public function update(Request $request, $id)
+    {
+        $leave = LeaveRequest::where('user_id', Auth::id())->findOrFail($id);
 
+        $request->validate([
+            'leave_type' => 'required|in:sick,casual,annual',
+            'reason' => 'nullable|string',
+            'start_date' => 'required|date',
+            'end_date' => 'required|date|after_or_equal:start_date',
+        ]);
         $request->validate([
             'leave_type' => 'required|in:sick,casual,annual',
             'reason' => 'nullable|string',
@@ -337,13 +445,28 @@ class LeaveRequestController extends Controller
         $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
             ->filter(fn($date) => !$date->isWeekend())
             ->count();
+        // Calculate requested weekdays
+        $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
+            ->filter(fn($date) => !$date->isWeekend())
+            ->count();
 
         $limits = [
             'casual' => 10,
             'annual' => 10,
             'sick' => 8,
         ];
+        $limits = [
+            'casual' => 10,
+            'annual' => 10,
+            'sick' => 8,
+        ];
 
+        // Casual consecutive rule
+        if ($leaveType === 'casual' && $daysRequested > 2) {
+            return response()->json([
+                'message' => 'Casual leaves cannot be taken for more than 2 consecutive weekdays.'
+            ], 422);
+        }
         // Casual consecutive rule
         if ($leaveType === 'casual' && $daysRequested > 2) {
             return response()->json([
@@ -395,9 +518,23 @@ class LeaveRequestController extends Controller
             'end_date' => $endDate,
             'status' => 'Pending',
         ]);
+        // Update and force back to Pending
+        $leave->update([
+            'leave_type' => $leaveType,
+            'reason' => $request->reason,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'status' => 'Pending',
+        ]);
 
         $sender_name = Auth::user()->name;
+        $sender_name = Auth::user()->name;
 
+        $fixedEmails = [
+            'Faran@archilance.net',
+            'info@archilance.net',
+            'HR@archilance.net'
+        ];
         $fixedEmails = [
             'Faran@archilance.net',
             'info@archilance.net',
@@ -408,9 +545,19 @@ class LeaveRequestController extends Controller
             ->orWhere('employee_type', 'Executive')
             ->pluck('email')
             ->toArray();
+        $all_managers = User::where('employee_type', 'Manager')
+            ->orWhere('employee_type', 'Executive')
+            ->pluck('email')
+            ->toArray();
 
         $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
+        $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
 
+        \Mail::send(
+            'mails.new-leave-request',
+            compact('sender_name', 'leaveType', 'endDate', 'startDate'),
+            function ($message) use ($sender_name, $allEmails) {
+                $message->from("info@archilance.net", $sender_name)
         \Mail::send(
             'mails.new-leave-request',
             compact('sender_name', 'leaveType', 'endDate', 'startDate'),
@@ -420,7 +567,15 @@ class LeaveRequestController extends Controller
                     ->subject($sender_name . ' updated leave request - Archilance LLC');
             }
         );
+                    ->subject($sender_name . ' updated leave request - Archilance LLC');
+            }
+        );
 
+        return response()->json([
+            'message' => 'Leave request updated and resubmitted successfully.',
+            'data' => $leave
+        ]);
+    }
         return response()->json([
             'message' => 'Leave request updated and resubmitted successfully.',
             'data' => $leave

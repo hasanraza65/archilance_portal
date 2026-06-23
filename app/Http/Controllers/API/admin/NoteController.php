@@ -27,7 +27,7 @@ class NoteController extends Controller
     /**
      * Store a newly created note
      */
-    public function store(Request $request)
+   public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'project_id' => 'nullable|integer',

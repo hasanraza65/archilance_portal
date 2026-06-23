@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Storage;
 use App\Models\User;
 use App\Services\OneDriveService;
 use GuzzleHttp\Client;
+use GuzzleHttp\Client;
 
 
 class ChatController extends Controller
@@ -24,31 +25,43 @@ class ChatController extends Controller
             'receiver_id'   => 'required|exists:users,id',
             'message'       => 'nullable|string',
             'attachments.*' => 'nullable|file|max:10240',
+            'attachments.*' => 'nullable|file|max:10240',
         ]);
+    
+        $senderId = Auth::id();
+    
     
         $senderId = Auth::id();
     
         $chat = Chat::create([
             'sender_id'   => $senderId,
+            'sender_id'   => $senderId,
             'receiver_id' => $request->receiver_id,
             'message'     => $request->message,
             'reply_to'    => $request->reply_to
+            'reply_to'    => $request->reply_to
         ]);
+    
     
         // Handle attachments
         if ($request->hasFile('attachments')) {
     
+    
             foreach ($request->file('attachments') as $file) {
     
+    
                 $path = 'chat_attachments/' . $chat->id . '/' . uniqid() . '_' . $file->getClientOriginalName();
+    
     
                 app(OneDriveService::class)->upload(
                     $path,
                     file_get_contents($file->getRealPath())
                 );
     
+    
                 ChatAttachment::create([
                     'chat_id'   => $chat->id,
+                    'user_id'   => $senderId,
                     'user_id'   => $senderId,
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
@@ -57,6 +70,13 @@ class ChatController extends Controller
                 ]);
             }
         }
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Intelligent Email Notification Logic
+        |--------------------------------------------------------------------------
+        */
+    
     
         /*
         |--------------------------------------------------------------------------
