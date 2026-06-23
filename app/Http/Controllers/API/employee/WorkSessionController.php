@@ -13,7 +13,6 @@ use Illuminate\Support\Facades\DB;
 use App\Models\TrackWindow;
 use App\Models\WorkingHour;
 use App\Models\ActivityLog;
-use App\Models\ActivityLog;
 use Illuminate\Support\Facades\Validator;
 
 
