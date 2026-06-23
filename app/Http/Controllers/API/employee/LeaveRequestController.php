@@ -15,7 +15,7 @@ class LeaveRequestController extends Controller
 {
     // List all leave requests of the logged-in employee
     public function index()
-    public function index()
+   
 {
     $user = Auth::user();
     $userId = $user->id;
@@ -132,10 +132,8 @@ class LeaveRequestController extends Controller
     // Status counts
     $counts = [
         'total' => LeaveRequest::where('user_id', $userId)->count(),
-        'total' => LeaveRequest::where('user_id', $userId)->count(),
         'approved' => LeaveRequest::where('user_id', $userId)->where('status', 'Approved')->count(),
         'rejected' => LeaveRequest::where('user_id', $userId)->where('status', 'Rejected')->count(),
-        'pending' => LeaveRequest::where('user_id', $userId)->where('status', 'Pending')->count(),
         'pending' => LeaveRequest::where('user_id', $userId)->where('status', 'Pending')->count(),
     ];
 
@@ -144,15 +142,12 @@ class LeaveRequestController extends Controller
         'counts' => $counts,
         'data' => $leaveRequests,
         'cycle' => [
-        'types' => $typeCounts,
-        'counts' => $counts,
-        'data' => $leaveRequests,
-        'cycle' => [
             'start' => $cycleStart->toDateString(),
-            'end' => $cycleEnd->toDateString(),
             'end' => $cycleEnd->toDateString(),
         ]
     ]);
+}
+
 }
 
 
@@ -305,13 +300,7 @@ class LeaveRequestController extends Controller
         // Send email
         \Mail::send('mails.new-leave-request', compact('sender_name', 'leaveType', 'endDate', 'startDate'), function ($message) use ($sender_name, $allEmails) {
             $message->from("info@archilance.net", $sender_name)
-        // Send email
-        \Mail::send('mails.new-leave-request', compact('sender_name', 'leaveType', 'endDate', 'startDate'), function ($message) use ($sender_name, $allEmails) {
-            $message->from("info@archilance.net", $sender_name)
-                ->to($allEmails)
-                ->subject($sender_name . ' request for leaves - Archilance LLC');
-        });
-                ->subject($sender_name . ' request for leaves - Archilance LLC');
+            ->subject($sender_name . ' request for leaves - Archilance LLC');
         });
 
         return response()->json([
@@ -415,9 +404,7 @@ class LeaveRequestController extends Controller
 
 
     // Update a leave request (only if pending)
-    public function update(Request $request, $id)
-    {
-        $leave = LeaveRequest::where('user_id', Auth::id())->findOrFail($id);
+  
     public function update(Request $request, $id)
     {
         $leave = LeaveRequest::where('user_id', Auth::id())->findOrFail($id);
@@ -558,24 +545,11 @@ class LeaveRequestController extends Controller
             compact('sender_name', 'leaveType', 'endDate', 'startDate'),
             function ($message) use ($sender_name, $allEmails) {
                 $message->from("info@archilance.net", $sender_name)
-        \Mail::send(
-            'mails.new-leave-request',
-            compact('sender_name', 'leaveType', 'endDate', 'startDate'),
-            function ($message) use ($sender_name, $allEmails) {
-                $message->from("info@archilance.net", $sender_name)
-                    ->to($allEmails)
-                    ->subject($sender_name . ' updated leave request - Archilance LLC');
-            }
-        );
-                    ->subject($sender_name . ' updated leave request - Archilance LLC');
+                ->subject($sender_name . ' updated leave request - Archilance LLC');
             }
         );
 
-        return response()->json([
-            'message' => 'Leave request updated and resubmitted successfully.',
-            'data' => $leave
-        ]);
-    }
+        
         return response()->json([
             'message' => 'Leave request updated and resubmitted successfully.',
             'data' => $leave
@@ -596,3 +570,4 @@ class LeaveRequestController extends Controller
         return response()->json(['message' => 'Leave request canceled.']);
     }
 }
+

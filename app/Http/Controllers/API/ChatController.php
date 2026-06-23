@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\Storage;
 use App\Models\User;
 use App\Services\OneDriveService;
 use GuzzleHttp\Client;
-use GuzzleHttp\Client;
+
 
 
 class ChatController extends Controller
@@ -35,10 +35,8 @@ class ChatController extends Controller
     
         $chat = Chat::create([
             'sender_id'   => $senderId,
-            'sender_id'   => $senderId,
             'receiver_id' => $request->receiver_id,
             'message'     => $request->message,
-            'reply_to'    => $request->reply_to
             'reply_to'    => $request->reply_to
         ]);
     
@@ -61,7 +59,6 @@ class ChatController extends Controller
     
                 ChatAttachment::create([
                     'chat_id'   => $chat->id,
-                    'user_id'   => $senderId,
                     'user_id'   => $senderId,
                     'file_path' => $path,
                     'file_type' => $file->getClientMimeType(),
