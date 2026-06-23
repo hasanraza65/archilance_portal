@@ -18,13 +18,6 @@ use Intervention\Image\Drivers\Gd\Driver;
 use Illuminate\Support\Str;
 
 
-use Illuminate\Support\Facades\Storage;
-use Intervention\Image\ImageManager;
-use Intervention\Image\Drivers\Gd\Driver;
-
-use Illuminate\Support\Str;
-
-
 class ScreenshotController extends Controller
 {
 
