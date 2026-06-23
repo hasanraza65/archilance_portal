@@ -90,4 +90,11 @@ class DashboardController extends Controller
         ]);
 
     }
+
+     public function trackerVersion(){
+
+        
+        return response()->json(['current_version'=>"3.0.3"]);
+
+    }
 }

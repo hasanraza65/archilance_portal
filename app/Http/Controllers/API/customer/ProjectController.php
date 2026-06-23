@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Project;
 use App\Models\ProjectTask;
-use App\Models\TaskAssignee;
 use Auth;
 use App\Models\CustomerTeam;
 use App\Models\WorkSession;
@@ -20,23 +19,24 @@ class ProjectController extends Controller
     {
         $user = Auth::user();
 
-        if ($user->user_role == 5) {
-            // TEAM MEMBER
+        $withRelations = [
+            'customer:id,name,profile_pic',
+            'projectAssignees:id,employee_id,project_id',
+            'projectAssignees.user:id,name,profile_pic',
+        ];
 
-            // Get all customer IDs linked to this team member via email
+        if ($user->user_role == 5) {
             $customerIds = CustomerTeam::where('email', $user->email)
                 ->where('status', 'Approved')
                 ->pluck('customer_id');
 
             $projects = Project::latest()
-                ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+                ->with($withRelations)
                 ->whereIn('customer_id', $customerIds)
                 ->get();
         } else {
-            // CUSTOMER
-
             $projects = Project::latest()
-                ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+                ->with($withRelations)
                 ->where('customer_id', $user->id)
                 ->get();
         }
@@ -60,31 +60,32 @@ class ProjectController extends Controller
             $customerIds = [$user->id];
         }
 
-        // Step 2: Build query for tasks related to those customers
+        $page = $request->input('page', 1);
+        $perPage = 10;
+
+        // Use whereIn with subquery instead of whereHas for better performance
         $query = ProjectTask::with([
             'project',
-            'assignees',
-            'assignees.user',
-            'creator',
+            'assignees:id,employee_id,task_id',
+            'assignees.user:id,name,profile_pic',
+            'creator:id,name,profile_pic',
             'attachments',
             'subTasks',
-            'subTasks.assignees',
-            'subTasks.assignees.user',
-            'subTasks.creator',
+            'subTasks.assignees:id,employee_id,task_id',
+            'subTasks.assignees.user:id,name,profile_pic',
+            'subTasks.creator:id,name,profile_pic',
             'subTasks.attachments',
         ])
-            ->whereNull('parent_task_id') // Only main tasks
-            ->whereHas('project', function ($q) use ($customerIds) {
-                $q->whereIn('customer_id', $customerIds);
+            ->whereNull('parent_task_id')
+            ->whereIn('project_id', function ($sq) use ($customerIds) {
+                $sq->select('id')->from('projects')->whereIn('customer_id', $customerIds)->whereNull('deleted_at');
             })
             ->latest();
 
-        // Step 3: Filter by task_status if provided
         if ($request->filled('task_status')) {
             $query->where('task_status', $request->task_status);
         }
 
-        // Step 4: Build result array (with or without sub-tasks)
         $mainTasks = $query->get();
         $result = [];
 
@@ -106,7 +107,18 @@ class ProjectController extends Controller
             }
         }
 
-        return response()->json($result);
+        $total = count($result);
+        $offset = ($page - 1) * $perPage;
+        $paginated = array_slice($result, $offset, $perPage);
+
+        return response()->json([
+            'data' => $paginated,
+            'current_page' => (int) $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'last_page' => (int) ceil($total / $perPage),
+            'has_more' => ($offset + $perPage) < $total,
+        ]);
     }
 
 

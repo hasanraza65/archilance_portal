@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Project;
 use App\Models\ProjectTask;
-use App\Models\TaskAssignee;
 use App\Models\ProjectAssignee;
 use Auth;
 use App\Models\WorkSession;
@@ -16,10 +15,16 @@ use App\Models\User;
 
 class ProjectController extends Controller
 {
-   public function index(Request $request)
+    public function index(Request $request)
     {
         $user = Auth::user();
-    
+
+        // Electron time tracker — slim paginated response, no heavy relations
+        $userAgent = $request->header('User-Agent', '');
+        if (strpos($userAgent, 'Electron') !== false) {
+            return $this->indexForElectron($request, $user);
+        }
+
         $statusOrder = [
             'On Hold' => 1,
             'Backlog' => 2,
@@ -29,175 +34,161 @@ class ProjectController extends Controller
             'Client Review' => 6,
             'Completed' => 7,
         ];
-    
-        // ✅ If Manager and no "assigned_me" filter → show all projects
-        if (($user->employee_type == "Manager" || $user->employee_type == "Supervisor" || $user->employee_type == "Executive") 
-            && !$request->boolean('assigned_me')) {
-            
-             $projects = Project::latest()
-            ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
-            ->when($request->customer_id, function ($query) use ($request) {
-                $query->where('customer_id', $request->customer_id);
-            })
-            ->get();
-        } 
-        else {
-            // ✅ Default employee logic (and Manager with assigned_me=1)
-            $userId = $user->id;
-    
-            $assigned_tasks_ids = TaskAssignee::where('employee_id', $userId)
-                ->pluck('task_id')
-                ->toArray();
-    
-            $assigned_projects_ids = ProjectTask::whereIn('id', $assigned_tasks_ids)
-                ->pluck('project_id')
-                ->toArray();
-    
-            $linked_project_ids = ProjectAssignee::where('employee_id', $userId)
-                ->pluck('project_id')
-                ->toArray();
-    
-            $all_project_ids = array_unique(array_merge($assigned_projects_ids, $linked_project_ids));
-    
+
+        $withRelations = [
+            'customer:id,name,profile_pic',
+            'projectAssignees:id,employee_id,project_id',
+            'projectAssignees.user:id,name,profile_pic',
+        ];
+
+        if (
+            ($user->employee_type == "Manager" || $user->employee_type == "Supervisor" || $user->employee_type == "Executive")
+            && !$request->boolean('assigned_me')
+        ) {
             $projects = Project::latest()
-                ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+                ->with($withRelations)
+                ->when($request->customer_id, function ($query) use ($request) {
+                    $query->where('customer_id', $request->customer_id);
+                })
+                ->get();
+        } else {
+            $userId = $user->id;
+
+            // Single join query instead of 3 sequential queries
+            $linkedProjectIds = ProjectAssignee::where('employee_id', $userId)
+                ->pluck('project_id');
+
+            $taskProjectIds = DB::table('task_assignees')
+                ->join('project_tasks', 'task_assignees.task_id', '=', 'project_tasks.id')
+                ->where('task_assignees.employee_id', $userId)
+                ->whereNull('project_tasks.deleted_at')
+                ->pluck('project_tasks.project_id');
+
+            $all_project_ids = $linkedProjectIds->merge($taskProjectIds)->unique()->values()->toArray();
+
+            $projects = Project::latest()
+                ->with($withRelations)
                 ->whereIn('id', $all_project_ids)
                 ->when($request->customer_id, function ($query) use ($request) {
-                        $query->where('customer_id', $request->customer_id);
-                    })
+                    $query->where('customer_id', $request->customer_id);
+                })
                 ->get();
         }
-    
+
         // ✅ Group by status
         $grouped = [];
         foreach ($projects as $project) {
             $status = $project->status ?? 'Unknown';
             $grouped[$status][] = $project;
         }
-    
+
         // ✅ Sort groups based on $statusOrder
         uksort($grouped, function ($a, $b) use ($statusOrder) {
             $orderA = $statusOrder[$a] ?? 999;
             $orderB = $statusOrder[$b] ?? 999;
             return $orderA <=> $orderB;
         });
-        
+
         $userAgent = $request->header('User-Agent');
         if (strpos($userAgent, 'Electron') !== false) {
             return response()->json($projects); // old structure
         }
-    
+
         return response()->json($grouped);
     }
 
 
+    private function indexForElectron(Request $request, $user)
+    {
+        $page    = max(1, (int) $request->input('page', 1));
+        $perPage = 20;
+        $search  = trim($request->input('search', ''));
+
+        $isPrivileged = (
+            $user->employee_type == 'Manager' ||
+            $user->employee_type == 'Supervisor' ||
+            $user->employee_type == 'Executive'
+        ) && !$request->boolean('assigned_me');
+
+        $query = Project::select(['id', 'project_name', 'status', 'project_description', 'created_at'])
+            ->latest();
+
+        if (!$isPrivileged) {
+            $userId = $user->id;
+
+            $linkedIds = ProjectAssignee::where('employee_id', $userId)->pluck('project_id');
+
+            $taskIds = DB::table('task_assignees')
+                ->join('project_tasks', 'task_assignees.task_id', '=', 'project_tasks.id')
+                ->where('task_assignees.employee_id', $userId)
+                ->whereNull('project_tasks.deleted_at')
+                ->pluck('project_tasks.project_id');
+
+            $allIds = $linkedIds->merge($taskIds)->unique()->values();
+            $query->whereIn('id', $allIds);
+        }
+
+        if ($search !== '') {
+            $query->where('project_name', 'like', '%' . $search . '%');
+        }
+
+        $paginated = $query->paginate($perPage, ['*'], 'page', $page);
+
+        return response()->json([
+            'data'         => $paginated->items(),
+            'total'        => $paginated->total(),
+            'current_page' => $paginated->currentPage(),
+            'last_page'    => $paginated->lastPage(),
+            'has_more'     => $paginated->hasMorePages(),
+        ]);
+    }
+
     public function projectsWithTasks(Request $request)
     {
         $user = Auth::user();
-        $statusOrder = [
-            'On Hold' => 1,
-            'Backlog' => 2,
-            'Awaiting Info' => 3,
-            'In Progress' => 4,
-            'In-house review' => 5,
-            'Client Review' => 6,
-            'Completed' => 7,
-        ];
+        $task_status = $request->task_status ?? 'On Hold';
+        $page = $request->input('page', 1);
+        $perPage = 10;
 
-        // ✅ Manager sees all tasks (like admin) unless assigned_me=1 is set
-     if (($user->employee_type == "Manager" || $user->employee_type == "Supervisor") || $user->employee_type == "Executive" && !$request->boolean('assigned_me')) {
-            $query = ProjectTask::with([
-                'project',
-                'assignees',
-                'assignees.user',
-                'creator',
-                'attachments',
-                'subTasks',
-                'subTasks.assignees',
-                'subTasks.assignees.user',
-                'subTasks.creator',
-                'subTasks.attachments'
-            ])
-                ->whereNull('parent_task_id')
-                ->where('task_status', '!=', 'Todo');
-
-            if ($request->filled('task_status')) {
-                $query->where('task_status', $request->task_status);
-            }
-
-            $mainTasks = $query->get();
-
-            $result = [];
-            foreach ($mainTasks as $task) {
-                if ($task->subTasks->isNotEmpty()) {
-                    foreach ($task->subTasks as $sub) {
-                        $result[] = [
-                            'project' => $task->project,
-                            'task' => $task,
-                            'sub_task' => $sub,
-                        ];
-                    }
-                } else {
-                    $result[] = [
-                        'project' => $task->project,
-                        'task' => $task,
-                        'sub_task' => null,
-                    ];
-                }
-            }
-
-            // Apply status-based sorting
-            usort($result, function ($a, $b) use ($statusOrder) {
-                $statusA = $a['sub_task'] ? $a['sub_task']->task_status : $a['task']->task_status;
-                $statusB = $b['sub_task'] ? $b['sub_task']->task_status : $b['task']->task_status;
-
-                $orderA = $statusOrder[$statusA] ?? 999;
-                $orderB = $statusOrder[$statusB] ?? 999;
-
-                return $orderA <=> $orderB;
-            });
-
-            return response()->json($result);
-        }
-
-        // ✅ Default employee logic (and Manager with assigned_me=1)
-        $userId = $user->id;
-
-        // Tasks directly assigned to this employee
-        $assignedTaskIds = TaskAssignee::where('employee_id', $userId)
-            ->pluck('task_id')
-            ->toArray();
-
-        // Projects assigned to this employee
-        $assignedProjectIds = ProjectAssignee::where('employee_id', $userId)
-            ->pluck('project_id')
-            ->toArray();
+        $isPrivileged = ($user->employee_type == "Manager" || $user->employee_type == "Supervisor" || $user->employee_type == "Executive")
+            && !$request->boolean('assigned_me');
 
         $query = ProjectTask::with([
             'project',
-            'assignees',
-            'assignees.user',
-            'creator',
+            'assignees:id,employee_id,task_id',
+            'assignees.user:id,name,profile_pic',
+            'creator:id,name,profile_pic',
             'attachments',
             'subTasks',
-            'subTasks.assignees',
-            'subTasks.assignees.user',
-            'subTasks.creator',
-            'subTasks.attachments'
+            'subTasks.assignees:id,employee_id,task_id',
+            'subTasks.assignees.user:id,name,profile_pic',
+            'subTasks.creator:id,name,profile_pic',
+            'subTasks.attachments',
         ])
-            ->where(function ($q) use ($assignedTaskIds, $assignedProjectIds) {
-                $q->whereIn('id', $assignedTaskIds)
-                    ->orWhereIn('project_id', $assignedProjectIds);
-            })
             ->whereNull('parent_task_id')
-            ->where('task_status', '!=', 'Todo');
+            ->where('task_status', $task_status);
 
-        if ($request->filled('task_status')) {
-            $query->where('task_status', $request->task_status);
+        if (!$isPrivileged) {
+            $userId = $user->id;
+
+            // Subqueries instead of two separate pluck() calls
+            $query->where(function ($q) use ($userId) {
+                $q->whereIn('project_id', function ($sq) use ($userId) {
+                    $sq->select('project_id')
+                        ->from('project_assignees')
+                        ->where('employee_id', $userId);
+                })->orWhereIn('id', function ($sq) use ($userId) {
+                    $sq->select('task_id')
+                        ->from('task_assignees')
+                        ->where('employee_id', $userId);
+                });
+            });
         }
 
+        // ✅ Get ALL tasks (no paginate here, because subtasks expand row count)
         $mainTasks = $query->get();
 
+        // --- Build flat result first ---
         $result = [];
         foreach ($mainTasks as $task) {
             if ($task->subTasks->isNotEmpty()) {
@@ -217,20 +208,123 @@ class ProjectController extends Controller
             }
         }
 
-        // Apply status-based sorting
-        usort($result, function ($a, $b) use ($statusOrder) {
-            $statusA = $a['sub_task'] ? $a['sub_task']->task_status : $a['task']->task_status;
-            $statusB = $b['sub_task'] ? $b['sub_task']->task_status : $b['task']->task_status;
+        // ✅ Paginate the flat result array AFTER expansion
+        $total = count($result);
+        $offset = ($page - 1) * $perPage;
+        $paginated = array_slice($result, $offset, $perPage);
 
-            $orderA = $statusOrder[$statusA] ?? 999;
-            $orderB = $statusOrder[$statusB] ?? 999;
-
-            return $orderA <=> $orderB;
-        });
-
-        return response()->json($result);
+        // ✅ Return same data shape + pagination meta
+        return response()->json([
+            'data' => $paginated,
+            'current_page' => (int) $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'last_page' => (int) ceil($total / $perPage),
+            'has_more' => ($offset + $perPage) < $total,
+        ]);
     }
 
+    public function projectsWithTasksCalendar(Request $request)
+    {
+        $user = Auth::user();
+
+        // --- Date resolution ---
+        $targetDate = $request->input('date')
+            ? Carbon::parse($request->input('date'))->startOfDay()
+            : Carbon::today();
+
+        $page = $request->input('page', 1);
+        $perPage = 10;
+
+        // --- Privilege check (same logic as projectsWithTasks) ---
+        $isPrivileged = ($user->employee_type == "Manager"
+            || $user->employee_type == "Supervisor"
+            || $user->employee_type == "Executive")
+            && !$request->boolean('assigned_me');
+
+        $query = ProjectTask::with([
+            'project',
+            'assignees:id,employee_id,task_id',
+            'assignees.user:id,name,profile_pic',
+            'creator:id,name,profile_pic',
+            'attachments',
+            'subTasks',
+            'subTasks.assignees:id,employee_id,task_id',
+            'subTasks.assignees.user:id,name,profile_pic',
+            'subTasks.creator:id,name,profile_pic',
+            'subTasks.attachments',
+        ])
+            ->whereNull('parent_task_id')
+            ->where(function ($q) use ($targetDate) {
+                $q->whereDate('start_date', '<=', $targetDate)
+                    ->whereDate('due_date', '>=', $targetDate);
+            });
+
+        if (!$isPrivileged) {
+            $userId = $user->id;
+
+            $query->where(function ($q) use ($userId) {
+                $q->whereIn('project_id', function ($sq) use ($userId) {
+                    $sq->select('project_id')
+                        ->from('project_assignees')
+                        ->where('employee_id', $userId);
+                })->orWhereIn('id', function ($sq) use ($userId) {
+                    $sq->select('task_id')
+                        ->from('task_assignees')
+                        ->where('employee_id', $userId);
+                });
+            });
+        }
+
+        $mainTasks = $query->get();
+
+        // --- Expand tasks + subtasks into flat rows (same pattern as projectsWithTasks) ---
+        $rows = [];
+        foreach ($mainTasks as $task) {
+            if ($task->subTasks->isNotEmpty()) {
+                foreach ($task->subTasks as $sub) {
+                    $rows[] = [
+                        'project' => $task->project,
+                        'task' => $task,
+                        'sub_task' => $sub,
+                    ];
+                }
+            } else {
+                $rows[] = [
+                    'project' => $task->project,
+                    'task' => $task,
+                    'sub_task' => null,
+                ];
+            }
+        }
+
+        // --- Paginate the flat rows ---
+        $total = count($rows);
+        $offset = ($page - 1) * $perPage;
+        $paginated = array_slice($rows, $offset, $perPage);
+
+        // --- Summary counts for the date (before pagination) ---
+        $uniqueTaskIds = collect($rows)->pluck('task.id')->unique()->count();
+        $uniqueSubIds = collect($rows)->filter(fn($r) => $r['sub_task'] !== null)
+            ->pluck('sub_task.id')->unique()->count();
+        $uniqueProjectIds = collect($rows)->pluck('project.id')->unique()->count();
+
+        return response()->json([
+            'date' => $targetDate->toDateString(),   // "2026-05-19"
+            'summary' => [
+                'total_projects' => $uniqueProjectIds,
+                'total_tasks' => $uniqueTaskIds,
+                'total_sub_tasks' => $uniqueSubIds,
+                'total_rows' => $total,                   // expanded row count
+            ],
+            'data' => $paginated,
+            'current_page' => (int) $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'last_page' => (int) ceil($total / $perPage),
+            'has_more' => ($offset + $perPage) < $total,
+        ]);
+    }
 
     public function store(Request $request)
     {
@@ -266,9 +360,9 @@ class ProjectController extends Controller
 
 
             $user = User::find($request->employee_ids[$i]);
-             $projectId = $project->id;
+            $projectId = $project->id;
 
-            if($user){
+            if ($user) {
 
                 $project_detail = Project::find($projectId);
                 $from_user = User::find(\Auth::user()->id);
@@ -306,196 +400,120 @@ class ProjectController extends Controller
             'allNotes'
         ])->findOrFail($id);
 
-        $taskHours = [];
-
-        // 1. Calculate hours for every task (including child tasks)
-        // Get date filters (if supplied)
         $startDateFilter = $request->summary_start_date ?? null;
-        $endDateFilter = $request->summary_end_date ?? null;
-        
-      //  \Log::info($project->allTasks);
+        $endDateFilter   = $request->summary_end_date   ?? null;
 
-       foreach ($project->allTasks as $task) {
-            $taskHours[$task->id] = $this->calculateEmployeeTaskHours(
-                null,
-                $task->id,
-                $startDateFilter,
-                $endDateFilter
-            );
-        }
-        // 2. Roll up child tasks into parent
-        $rolledUpHours = [];
-        foreach ($project->allTasks as $task) {
-            $hours = $taskHours[$task->id] ?? 0;
+        $allTaskIds = $project->allTasks->pluck('id')->toArray();
+        $taskHours  = [];
 
-            if ($task->parent_task_id) {
-                // add to parent’s hours
-               // \Log::info('child task hours '.$hours.' for id '.$task->id);
-                $rolledUpHours[$task->parent_task_id] = ($rolledUpHours[$task->parent_task_id] ?? 0) + $hours;
-            } else {
-                // parent task itself
-                $rolledUpHours[$task->id] = ($rolledUpHours[$task->id] ?? 0) + $hours;
+        if (!empty($allTaskIds)) {
+            // 1. ONE query: all sessions for all tasks in this project
+            $sessionsQuery = WorkSession::whereIn('task_id', $allTaskIds);
+
+            if ($startDateFilter && $endDateFilter) {
+                $sessionsQuery->where(function ($q) use ($startDateFilter, $endDateFilter) {
+                    $q->whereBetween('start_date', [$startDateFilter, $endDateFilter])
+                        ->orWhereBetween('end_date', [$startDateFilter, $endDateFilter])
+                        ->orWhere(function ($q2) use ($startDateFilter, $endDateFilter) {
+                            $q2->where('start_date', '<', $startDateFilter)
+                                ->where('end_date', '>', $endDateFilter);
+                        });
+                });
+            } elseif ($startDateFilter) {
+                $sessionsQuery->where(function ($q) use ($startDateFilter) {
+                    $q->whereDate('start_date', '>=', $startDateFilter)
+                        ->orWhereDate('end_date', '>=', $startDateFilter);
+                });
+            } elseif ($endDateFilter) {
+                $sessionsQuery->where(function ($q) use ($endDateFilter) {
+                    $q->whereDate('start_date', '<=', $endDateFilter)
+                        ->orWhereDate('end_date', '<=', $endDateFilter);
+                });
             }
-        }
 
-        // 3. Build array of parent tasks with their total hours
-        $parentTasksWithHours = [];
-        foreach ($project->tasks->whereNull('parent_task_id') as $parentTask) {
-            
-            $totalHours = $rolledUpHours[$parentTask->id] ?? 0;
-            $parentTasksWithHours[] = [
-                'task_id' => $parentTask->id,
-                'task_title' => $parentTask->task_title,
-                'total_hours' => $totalHours,
-                'total_hours_formatted' => $this->formatHours($totalHours),
-            ];
-        }
+            $allSessions = $sessionsQuery->get();
 
-        // 4. Attach to project response
-        $project->tasks_hours_summary = $parentTasksWithHours;
+            // 2. ONE query: all adjustments for those sessions
+            $allSessionIds        = $allSessions->pluck('id')->toArray();
+            $adjustmentsBySession = !empty($allSessionIds)
+                ? DB::table('session_time_adjustments')
+                    ->whereIn('session_id', $allSessionIds)
+                    ->get()
+                    ->groupBy('session_id')
+                : collect();
 
-        return response()->json($project);
-    }
-    
+            // 3. Group sessions by task_id; compute hours in PHP — zero extra queries
+            $sessionsByTask = $allSessions->groupBy('task_id');
 
-    private function calculateEmployeeTaskHours($employeeId=null, $taskId, $startDateFilter = null, $endDateFilter = null)
-    {
-        
-        $sessionsQuery = WorkSession::where('task_id', $taskId);
+            foreach ($allTaskIds as $taskId) {
+                $sessions     = $sessionsByTask->get($taskId, collect());
+                $totalSeconds = 0;
 
-    
-        // Apply date range if provided
-        if ($startDateFilter && $endDateFilter) {
-            $sessionsQuery->where(function ($q) use ($startDateFilter, $endDateFilter) {
-                $q->whereBetween('start_date', [$startDateFilter, $endDateFilter])
-                  ->orWhereBetween('end_date', [$startDateFilter, $endDateFilter])
-                  ->orWhere(function ($q2) use ($startDateFilter, $endDateFilter) {
-                      $q2->where('start_date', '<', $startDateFilter)
-                         ->where('end_date', '>', $endDateFilter);
-                  });
-            });
-        } elseif ($startDateFilter) {
-            $sessionsQuery->where(function ($q) use ($startDateFilter) {
-                $q->whereDate('start_date', '>=', $startDateFilter)
-                  ->orWhereDate('end_date', '>=', $startDateFilter);
-            });
-        } elseif ($endDateFilter) {
-            $sessionsQuery->where(function ($q) use ($endDateFilter) {
-                $q->whereDate('start_date', '<=', $endDateFilter)
-                  ->orWhereDate('end_date', '<=', $endDateFilter);
-            });
-        }
-    
-        $sessions = $sessionsQuery->get();
-        
-       // \Log::info($sessions);
-    
-        $totalSeconds = 0;
-        $dateWiseTotals = [];
-        $dateWiseAdjustments = [];
-    
-        foreach ($sessions as $session) {
-            try {
-                // Parse start time
-                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
-    
-                // Parse end time (handle running sessions and null end dates)
-                if (is_null($session->end_time)) {
-                    $sessionEnd = now();
-                } else {
-                    $endDate = $session->end_date ?? $session->start_date;
-                    $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
-                }
-                
-                
-                
-                
-    
-                // Calculate session duration
-                $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
-    
-                // Subtract adjustments
-                $adjustmentSeconds = 0;
-                $adjustments = DB::table('session_time_adjustments')
-                    ->where('session_id', $session->id)
-                    ->get();
-    
-                foreach ($adjustments as $adj) {
-                    if (empty($adj->start_time) || empty($adj->end_time)) {
-                        continue;
-                    }
-    
+                foreach ($sessions as $session) {
                     try {
-                        $adjStart = Carbon::parse($adj->start_time);
-                        $adjEnd = Carbon::parse($adj->end_time);
-                        $adjustmentDuration = abs($adjEnd->diffInSeconds($adjStart));
-                        $adjustmentSeconds += $adjustmentDuration;
+                        $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+                        $sessionEnd   = is_null($session->end_time)
+                            ? now()
+                            : Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
+
+                        $sessionDuration   = abs($sessionEnd->diffInSeconds($sessionStart));
+                        $adjustmentSeconds = 0;
+
+                        foreach ($adjustmentsBySession->get($session->id, collect()) as $adj) {
+                            if (empty($adj->start_time) || empty($adj->end_time)) continue;
+                            try {
+                                $adjustmentSeconds += abs(
+                                    Carbon::parse($adj->end_time)->diffInSeconds(Carbon::parse($adj->start_time))
+                                );
+                            } catch (\Exception $e) {
+                                continue;
+                            }
+                        }
+
+                        $netSeconds = $sessionDuration - $adjustmentSeconds;
+                        if ($netSeconds > 0) {
+                            $totalSeconds += $netSeconds;
+                        }
                     } catch (\Exception $e) {
                         continue;
                     }
                 }
-    
-                // Compute net worked time
-                $netSeconds = $sessionDuration - $adjustmentSeconds;
-               //$netSeconds = $sessionDuration;
-               
-               
-               
-               
-    
-                if ($netSeconds > 0) {
-                    $totalSeconds += $netSeconds;
-    
-                    $date = Carbon::parse($session->start_date)->format('Y-m-d');
-    
-                    if (!isset($dateWiseTotals[$date])) {
-                        $dateWiseTotals[$date] = 0;
-                    }
-                    if (!isset($dateWiseAdjustments[$date])) {
-                        $dateWiseAdjustments[$date] = 0;
-                    }
-    
-                    $dateWiseTotals[$date] += $netSeconds;
-                    $dateWiseAdjustments[$date] += $adjustmentSeconds;
-                }
-                
-                
-                if($session->task_id == 433){
-                    
-                       // \Log::info('session start date '.$session->start_date);
-                       // \Log::info('session end date '.$session->end_date);
-                        
-                      //  \Log::info('session start time '.$session->start_time);
-                      //  \Log::info('session end time '.$session->end_time);
-                        
-                       // \Log::info('session duration '.$sessionDuration);
-                      //  \Log::info('idle duration '.$adjustmentSeconds);
-                        
-                       // \Log::info('netSeconds '.$netSeconds);
-                        
-                     //    \Log::info('total seconds '.$totalSeconds);
-                    
-                }
-    
-            } catch (\Exception $e) {
-                continue;
+
+                $taskHours[$taskId] = $totalSeconds;
+            }
+        } else {
+            foreach ($project->allTasks as $task) {
+                $taskHours[$task->id] = 0;
             }
         }
-    
-        // ✅ Log date-wise totals and adjustments
-        foreach ($dateWiseTotals as $date => $seconds) {
-            $hours = round($seconds / 3600, 2);
-            $adjustHrs = isset($dateWiseAdjustments[$date]) ? round($dateWiseAdjustments[$date] / 3600, 2) : 0;
-            $totalWithAdj = round(($seconds + $dateWiseAdjustments[$date]) / 3600, 2);
-    
-           // \Log::info("[$date] Employee $employeeId - Task $taskId: Worked {$hours} hrs | Adjusted {$adjustHrs} hrs | Original {$totalWithAdj} hrs");
+
+        // Roll up child task hours into their parent
+        $rolledUpHours = [];
+        foreach ($project->allTasks as $task) {
+            $hours = $taskHours[$task->id] ?? 0;
+            if ($task->parent_task_id) {
+                $rolledUpHours[$task->parent_task_id] = ($rolledUpHours[$task->parent_task_id] ?? 0) + $hours;
+            } else {
+                $rolledUpHours[$task->id] = ($rolledUpHours[$task->id] ?? 0) + $hours;
+            }
         }
-        
-     
-        
-    
-        return $totalSeconds;
+
+        $parentTasksWithHours = [];
+        foreach ($project->tasks->whereNull('parent_task_id') as $parentTask) {
+            $totalHours             = $rolledUpHours[$parentTask->id] ?? 0;
+            $parentTasksWithHours[] = [
+                'task_id'               => $parentTask->id,
+                'task_title'            => $parentTask->task_title,
+                'total_hours'           => $totalHours,
+                'total_hours_formatted' => $this->formatHours($totalHours),
+            ];
+        }
+
+        $project->tasks_hours_summary = $parentTasksWithHours;
+
+        return response()->json($project);
     }
+
 
 
     // Helper method to format seconds into hours and minutes
@@ -537,9 +555,9 @@ class ProjectController extends Controller
             'customer_id' => 'nullable|exists:users,id',
         ]);
 
-        if($project->due_date != $request->due_date){
+        if ($project->due_date != $request->due_date) {
 
-              dueChangedNotification($id, $request->due_date, $type="project_due_date_updated");
+            dueChangedNotification($id, $request->due_date, $type = "project_due_date_updated");
 
         }
 

@@ -83,7 +83,8 @@ class UserManagementController extends Controller
                     'phone' => $request->phone,
                     'password' => bcrypt($request->password),
                     'user_role' => $roleId,
-                    'employee_type' => $request->employee_type ?? ''
+                    'employee_type' => $request->employee_type ?? '',
+                    
                 ]);
                 return response()->json($existing, 200);
             } else {
@@ -119,7 +120,8 @@ class UserManagementController extends Controller
             'phone' => $request->phone,
             'password' => bcrypt($request->password),
             'user_role' => $roleId,
-            'employee_type' => $request->employee_type ?? ''
+            'employee_type' => $request->employee_type ?? '',
+            'subscription_from' => $request->subscription_from ?? null
         ]);
 
         return response()->json($user, 201);
@@ -172,6 +174,7 @@ class UserManagementController extends Controller
             'username' => $request->username,
             'phone' => $request->phone,
             'employee_type' => $request->employee_type,
+            'subscription_from' => $request->subscription_from ?? null
         ];
 
         // Update password only if provided

@@ -30,9 +30,12 @@ class ProjectController extends Controller
             'Completed' => 7,
         ];
 
-        // ✅ Fetch all projects with relations
-    $projects = Project::latest()
-                ->with(['customer', 'projectAssignees', 'projectAssignees.user'])
+            $projects = Project::latest()
+                ->with([
+                    'customer:id,name,profile_pic',
+                    'projectAssignees:id,employee_id,project_id',
+                    'projectAssignees.user:id,name,profile_pic',
+                ])
                 ->when($request->customer_id, function ($query) use ($request) {
                     $query->where('customer_id', $request->customer_id);
                 })
@@ -70,17 +73,17 @@ class ProjectController extends Controller
 
         $query = ProjectTask::with([
             'project',
-            'assignees',
-            'assignees.user',
-            'creator',
+            'assignees:id,employee_id,task_id',
+            'assignees.user:id,name,profile_pic',
+            'creator:id,name,profile_pic',
             'attachments',
             'subTasks',
-            'subTasks.assignees',
-            'subTasks.assignees.user',
-            'subTasks.creator',
-            'subTasks.attachments'
+            'subTasks.assignees:id,employee_id,task_id',
+            'subTasks.assignees.user:id,name,profile_pic',
+            'subTasks.creator:id,name,profile_pic',
+            'subTasks.attachments',
         ])
-         ->whereNull('parent_task_id') // Only main tasks
+            ->whereNull('parent_task_id')
             ->where('task_status', '!=', 'Todo');
 
         if ($request->filled('task_status')) {
@@ -596,6 +599,83 @@ class ProjectController extends Controller
         return response()->json($works);
             
         
+    }
+    
+    
+    public function projectsWithTasksCalendar(Request $request)
+    {
+        // --- Date resolution ---
+        $targetDate = $request->input('date')
+            ? Carbon::parse($request->input('date'))->startOfDay()
+            : Carbon::today();
+
+        $page    = $request->input('page', 1);
+        $perPage = 10;
+
+        // --- Base query: tasks whose date range covers the target date ---
+        $mainTasks = ProjectTask::with([
+            'project',
+            'assignees:id,employee_id,task_id',
+            'assignees.user:id,name,profile_pic',
+            'creator:id,name,profile_pic',
+            'attachments',
+            'subTasks',
+            'subTasks.assignees:id,employee_id,task_id',
+            'subTasks.assignees.user:id,name,profile_pic',
+            'subTasks.creator:id,name,profile_pic',
+            'subTasks.attachments',
+        ])
+            ->whereNull('parent_task_id')
+            ->whereDate('due_date', $targetDate)
+            ->whereNull('completed_date')
+            ->get();
+
+        // --- Expand tasks + subtasks into flat rows ---
+        $rows = [];
+        foreach ($mainTasks as $task) {
+            if ($task->subTasks->isNotEmpty()) {
+                foreach ($task->subTasks as $sub) {
+                    $rows[] = [
+                        'project'  => $task->project,
+                        'task'     => $task,
+                        'sub_task' => $sub,
+                    ];
+                }
+            } else {
+                $rows[] = [
+                    'project'  => $task->project,
+                    'task'     => $task,
+                    'sub_task' => null,
+                ];
+            }
+        }
+
+        // --- Paginate the flat rows ---
+        $total     = count($rows);
+        $offset    = ($page - 1) * $perPage;
+        $paginated = array_slice($rows, $offset, $perPage);
+
+        // --- Summary counts for the date (before pagination) ---
+        $uniqueTaskIds    = collect($rows)->pluck('task.id')->unique()->count();
+        $uniqueSubIds     = collect($rows)->filter(fn($r) => $r['sub_task'] !== null)
+                                ->pluck('sub_task.id')->unique()->count();
+        $uniqueProjectIds = collect($rows)->pluck('project.id')->unique()->count();
+
+        return response()->json([
+            'date'         => $targetDate->toDateString(),
+            'summary'      => [
+                'total_projects'  => $uniqueProjectIds,
+                'total_tasks'     => $uniqueTaskIds,
+                'total_sub_tasks' => $uniqueSubIds,
+                'total_rows'      => $total,
+            ],
+            'data'         => $paginated,
+            'current_page' => (int) $page,
+            'per_page'     => $perPage,
+            'total'        => $total,
+            'last_page'    => (int) ceil($total / $perPage),
+            'has_more'     => ($offset + $perPage) < $total,
+        ]);
     }
 
 

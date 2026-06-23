@@ -86,65 +86,55 @@ class TaskAssigneeController extends Controller
     public function bulkAssign(Request $request)
     {
         $request->validate([
-            'task_id' => 'required|exists:project_tasks,id',
-            'employee_ids' => 'required|array',
-            'employee_ids.*' => 'exists:users,id'
+            'task_id'        => 'required|exists:project_tasks,id',
+            'employee_ids'   => 'required|array',
+            'employee_ids.*' => 'exists:users,id',
         ]);
 
-        $taskId = $request->task_id;
+        $taskId      = $request->task_id;
         $employeeIds = $request->employee_ids;
 
-        // Step 1: Remove all assignees not in the current list
+        // Remove assignees no longer in the list
         TaskAssignee::where('task_id', $taskId)
             ->whereNotIn('employee_id', $employeeIds)
             ->delete();
 
-        // Step 2: Assign new employees if not already assigned
-        $assigned = [];
-        $skipped = [];
+        // ONE query: find which employees are already assigned
+        $existingIds = TaskAssignee::where('task_id', $taskId)
+            ->whereIn('employee_id', $employeeIds)
+            ->pluck('employee_id')
+            ->toArray();
 
-        foreach ($employeeIds as $employeeId) {
-            $exists = TaskAssignee::where('task_id', $taskId)
-                                ->where('employee_id', $employeeId)
-                                ->exists();
+        $newEmployeeIds = array_values(array_diff($employeeIds, $existingIds));
+        $skipped        = $existingIds;
+        $assigned       = [];
 
-            if ($exists) {
-                $skipped[] = $employeeId;
-                continue;
-            }
+        if (!empty($newEmployeeIds)) {
+            // ONE query: load all new employees for notifications
+            $usersToNotify = User::whereIn('id', $newEmployeeIds)->get()->keyBy('id');
+            $fromUser      = \Auth::user();
+            $projectDetail = ProjectTask::find($taskId);
 
-            $assignee = TaskAssignee::create([
-                'task_id' => $taskId,
-                'employee_id' => $employeeId
-            ]);
+            foreach ($newEmployeeIds as $employeeId) {
+                $assignee   = TaskAssignee::create(['task_id' => $taskId, 'employee_id' => $employeeId]);
+                $assigned[] = $assignee;
 
-            $assigned[] = $assignee;
-            
-             // Send FCM notification
-            $user = User::find($employeeId);
-            if ($user && $user->fcm_token) {
-                    
-                FirebaseHelper::sendFcmNotification($user->fcm_token, "New Task", "A task/project was assigned.");
-                    
-            }
+                $user = $usersToNotify->get($employeeId);
+                if (!$user) continue;
 
-            $projectId = $taskId;
+                if ($user->fcm_token) {
+                    FirebaseHelper::sendFcmNotification($user->fcm_token, "New Task", "A task/project was assigned.");
+                }
 
-            if($user){
-
-                $project_detail = ProjectTask::find($projectId);
-                $from_user = User::find(\Auth::user()->id);
-                $nature = "primary";
-                $message = $from_user->name . " has assigned you a project " . $project_detail->task_title;
-
-                insertNotificationWithNature($user->id, \Auth::user()->id, "task_assigned", $message, $nature, $projectId);
+                $message = $fromUser->name . " has assigned you a project " . ($projectDetail->task_title ?? '');
+                insertNotificationWithNature($user->id, $fromUser->id, "task_assigned", $message, "primary", $taskId);
             }
         }
 
         return response()->json([
-            'message' => 'Bulk assignment completed.',
+            'message'  => 'Bulk assignment completed.',
             'assigned' => $assigned,
-            'skipped' => $skipped
+            'skipped'  => $skipped,
         ]);
     }
 

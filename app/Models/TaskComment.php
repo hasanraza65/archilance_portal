@@ -7,6 +7,10 @@ use Illuminate\Database\Eloquent\Model;
 class TaskComment extends Model
 {
     protected $guarded = [];
+    
+    protected $casts = [
+        'tagged_users' => 'array',
+    ];
 
     public function task()
     {
@@ -41,5 +45,21 @@ class TaskComment extends Model
     public function commentAttachments()
     {
         return $this->hasMany(TaskCommentAttachment::class, 'comment_id');
+    }
+    
+     public function pinnedInternalComments()
+    {
+        return $this->hasMany(TaskComment::class, 'task_id')
+            ->where('allowed_customer', 0)
+            ->where('is_pinned', 1)
+            ->latest();
+    }
+
+    public function pinnedCustomerComments()
+    {
+        return $this->hasMany(TaskComment::class, 'task_id')
+            ->where('allowed_customer', 1)
+            ->where('is_pinned', 1)
+            ->latest();
     }
 }

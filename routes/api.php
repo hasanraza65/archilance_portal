@@ -1,6 +1,7 @@
 <?php
 
 
+use App\Http\Controllers\API\DashboardController;
 use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\API\AuthController;
@@ -50,11 +51,14 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::resource('user-roles', UserRoleController::class);
     Route::resource('permissions', PermissionController::class);
-    
+
     Route::post('/update-fcm-token', [AuthController::class, 'updateFCMToken']);
 
 
     Route::prefix('admin')->middleware('role:2')->group(function () {
+
+        Route::post('/pin-task-comment', [TaskCommentController::class, 'pinComment']);
+        Route::post('/unpin-task-comment', [TaskCommentController::class, 'unpinComment']);
 
         //Project with tasks and comments Module
 
@@ -74,7 +78,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //ending Project Module
 
-         //User management
+        //User management
         Route::resource('employee-user', UserManagementController::class);
         Route::resource('supervisor-user', UserManagementController::class);
         Route::resource('customer-user', UserManagementController::class);
@@ -106,20 +110,23 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //customer team
         Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
-        
-        
+
+
         //
         Route::get('/projects-with-members', [ProjectController::class, 'projectsWithMember']);
-        
-        
+
+
         Route::post('/delete-idle-time', [App\Http\Controllers\API\employee\ScreenshotController::class, 'deleteIdleTime']);
 
 
         //working hours
         Route::resource('/working-hours', App\Http\Controllers\API\admin\WorkingHourController::class);
 
-         //checklist notes
+        //checklist notes
         Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+
+        Route::post('/create-bulk-notes', [App\Http\Controllers\API\admin\NoteController::class, 'bulkStore']);
+
         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
 
@@ -129,6 +136,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/update-joining-date', [UserManagementController::class, 'updateJoiningDate']);
 
         Route::get('/fetch-activity-logs/{id}', [App\Http\Controllers\API\employee\WorkSessionController::class, 'fetchActivityLogs']);
+
+        Route::get('/project-tasks-by-dates', [ProjectController::class, 'projectsWithTasksCalendar']);
+
+
+        Route::get('/deleted-screenshots/{session_id}', [App\Http\Controllers\API\employee\ScreenshotController::class, 'deletedScreenshots']);
 
 
     });
@@ -185,14 +197,15 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //customer team
         Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
-        
-        
+
+
         //
         Route::get('/projects-with-members', [ProjectController::class, 'projectsWithMember']);
 
 
-         //checklist notes
+        //checklist notes
         Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+        Route::post('/create-bulk-notes', [App\Http\Controllers\API\admin\NoteController::class, 'bulkStore']);
         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
 
@@ -200,6 +213,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     Route::prefix('employee')->middleware('role:3')->group(function () {
+
+        Route::post('/pin-task-comment', [TaskCommentController::class, 'pinComment']);
+        Route::post('/unpin-task-comment', [TaskCommentController::class, 'unpinComment']);
 
         Route::get('/stats', [App\Http\Controllers\API\DashboardController::class, 'employeeStats']);
 
@@ -231,9 +247,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //work session
         Route::resource('/work-session', App\Http\Controllers\API\employee\WorkSessionController::class);
-        
+
         Route::resource('/other-work-session', App\Http\Controllers\API\admin\WorkSessionController::class);
-        
+
         Route::resource('/screenshot', App\Http\Controllers\API\employee\ScreenshotController::class);
         Route::post('/manual-time', [App\Http\Controllers\API\employee\WorkSessionController::class, 'manualSession']);
         Route::post('/other-manual-time', [WorkSessionController::class, 'manualSession']);
@@ -251,26 +267,26 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::resource('/project-chat', App\Http\Controllers\API\employee\ProjectChatController::class);
 
         Route::get('/project-chat-with-customers/{id}', [App\Http\Controllers\API\employee\ProjectChatController::class, 'showWithCustomer']);
-        
-        
+
+
         Route::post('/update-project-status', [App\Http\Controllers\API\admin\ProjectController::class, 'updateStatus']);
 
         //dashboard
-        
+
         Route::post('/update-project-assignees', [App\Http\Controllers\API\admin\ProjectController::class, 'updateProjectAssignees']);
-        
-         Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
-        
-         Route::middleware('employeeType:Manager')->group(function () {
-             //project assignees
 
-          //  Route::post('/update-project-assignees', [App\Http\Controllers\API\admin\ProjectController::class, 'updateProjectAssignees']);
-    
+        Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
+
+        Route::middleware('employeeType:Manager')->group(function () {
+            //project assignees
+
+            //  Route::post('/update-project-assignees', [App\Http\Controllers\API\admin\ProjectController::class, 'updateProjectAssignees']);
+
             //customer team
-           // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
+            // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
 
 
-        Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
+            Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
 
 
 
@@ -278,33 +294,35 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
         Route::middleware('employeeType:Supervisor')->group(function () {
-             //project assignees
+            //project assignees
 
-           // Route::post('/update-project-assignees', [App\Http\Controllers\API\admin\ProjectController::class, 'updateProjectAssignees']);
-    
+            // Route::post('/update-project-assignees', [App\Http\Controllers\API\admin\ProjectController::class, 'updateProjectAssignees']);
+
             //customer team
-           // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
+            // Route::resource('/customer-team', App\Http\Controllers\API\admin\CustomerTeamController::class);
 
-           Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
+            Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
         });
 
         Route::middleware('employeeType:Executive')->group(function () {
             Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
         });
-        
-        
+
+
         Route::get('/projects-with-members', [ProjectController::class, 'projectsWithMember']);
-        
-        
+
+
         Route::resource('/track-window', App\Http\Controllers\API\employee\TrackWindowController::class);
 
-         //working hours
+        //working hours
         Route::resource('/working-hours', App\Http\Controllers\API\admin\WorkingHourController::class);
-        
-        
-        
-          //checklist notes
+
+
+
+        //checklist notes
         Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
+
+        Route::post('/create-bulk-notes', [App\Http\Controllers\API\admin\NoteController::class, 'bulkStore']);
 
         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
@@ -322,13 +340,16 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::prefix('customer')->middleware('role:4')->group(function () {
 
+        Route::post('/pin-task-comment', [TaskCommentController::class, 'pinComment']);
+        Route::post('/unpin-task-comment', [TaskCommentController::class, 'unpinComment']);
+
 
         Route::resource('/project-chat', App\Http\Controllers\API\customer\ProjectChatController::class);
 
         Route::resource('/project', App\Http\Controllers\API\customer\ProjectController::class);
-        
+
         Route::get('/projects-with-tasks', [App\Http\Controllers\API\customer\ProjectController::class, 'projectsWithTasks']);
-        
+
         Route::resource('/work-session', App\Http\Controllers\API\customer\WorkSessionController::class);
         Route::resource('/screenshot', App\Http\Controllers\API\customer\ScreenshotController::class);
         Route::resource('/project-task', App\Http\Controllers\API\customer\ProjectTaskController::class);
@@ -360,18 +381,19 @@ Route::middleware('auth:sanctum')->group(function () {
 
         //customer team
         Route::resource('/customer-team', App\Http\Controllers\API\customer\CustomerTeamController::class);
-        
-        
+
+
         Route::resource('/task-brief', App\Http\Controllers\API\employee\TaskBriefController::class);
-        
+
         Route::resource('/task-comment', App\Http\Controllers\API\employee\TaskCommentController::class);
 
         Route::get('/task-comment-with-customers', [App\Http\Controllers\API\employee\TaskCommentController::class, 'indexWithCustomer']);
 
 
-         //checklist notes
+        //checklist notes
         Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
-         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+        Route::post('/create-bulk-notes', [App\Http\Controllers\API\admin\NoteController::class, 'bulkStore']);
+        Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
     });
 
@@ -380,9 +402,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::resource('/project-chat', App\Http\Controllers\API\customer\ProjectChatController::class);
         Route::resource('/project', App\Http\Controllers\API\customer\ProjectController::class);
-        
+
         Route::get('/projects-with-tasks', [App\Http\Controllers\API\customer\ProjectController::class, 'projectsWithTasks']);
-        
+
         Route::resource('/work-session', App\Http\Controllers\API\customer\WorkSessionController::class);
         Route::resource('/screenshot', App\Http\Controllers\API\customer\ScreenshotController::class);
         Route::resource('/project-task', App\Http\Controllers\API\customer\ProjectTaskController::class);
@@ -392,9 +414,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/update-team-status', [App\Http\Controllers\API\customerteam\CustomerTeamController::class, 'updateTeamStatus']);
 
 
-         //checklist notes
+        //checklist notes
         Route::resource('/notes', App\Http\Controllers\API\admin\NoteController::class);
-         Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
+        Route::post('/create-bulk-notes', [App\Http\Controllers\API\admin\NoteController::class, 'bulkStore']);
+        Route::post('/update-note-status', [App\Http\Controllers\API\admin\NoteController::class, 'updateStatus']);
 
 
     });
@@ -423,7 +446,10 @@ Route::prefix('chat')->middleware('auth:sanctum')->group(function () {
 });
 
 
- //Route::get('/logout-other/{id}', [App\Http\Controllers\API\AuthController::class, 'logoutOtherUser']);
- 
- 
-  Route::get('/test-data', [ProjectController::class, 'testData']);
+//Route::get('/logout-other/{id}', [App\Http\Controllers\API\AuthController::class, 'logoutOtherUser']);
+
+
+Route::get('/test-data', [ProjectController::class, 'testData']);
+
+Route::get('/tracker-version', [App\Http\Controllers\API\DashboardController::class, 'trackerVersion']);
+

@@ -134,7 +134,7 @@ class ChatController extends Controller
                         ? $request->message 
                         : "📎 Sent you an attachment";
         
-            $this->sendFcmNotification($receiver->fcm_token, $title, $body);
+            $this->sendFcmNotification($receiver->fcm_token, $title, $body );
         }
 
         // Update last email sent time
@@ -150,107 +150,111 @@ class ChatController extends Controller
 
 
     protected function sendFcmNotification($token, $title, $body, $dataPayload = [])
-{
-    try {
-
-        \Log::info('FCM START');
-
-        $serviceAccountPath = storage_path('firebase/firebase-key.json');
-        $jsonKey = json_decode(file_get_contents($serviceAccountPath), true);
-
-        $client = new Client();
-
-        /*
-        |--------------------------------------------------------------------------
-        | 1. Generate OAuth Token
-        |--------------------------------------------------------------------------
-        */
-        $now = time();
-        $jwtHeader = base64_encode(json_encode([
-            'alg' => 'RS256',
-            'typ' => 'JWT'
-        ]));
-
-        $jwtClaim = base64_encode(json_encode([
-            'iss' => $jsonKey['client_email'],
-            'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
-            'aud' => 'https://oauth2.googleapis.com/token',
-            'exp' => $now + 3600,
-            'iat' => $now
-        ]));
-
-        $unsignedJwt = $jwtHeader . '.' . $jwtClaim;
-
-        openssl_sign($unsignedJwt, $signature, $jsonKey['private_key'], 'sha256');
-        $jwt = $unsignedJwt . '.' . base64_encode($signature);
-
-        $response = $client->post('https://oauth2.googleapis.com/token', [
-            'form_params' => [
-                'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-                'assertion' => $jwt,
-            ]
-        ]);
-
-        $accessToken = json_decode((string) $response->getBody(), true)['access_token'];
-
-        \Log::info('FCM TOKEN GENERATED');
-
-        /*
-        |--------------------------------------------------------------------------
-        | 2. Send Notification
-        |--------------------------------------------------------------------------
-        */
-
-        $projectId = $jsonKey['project_id'];
-
-        $fcmResponse = $client->post(
-            "https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send",
-            [
-                'headers' => [
-                    'Authorization' => 'Bearer ' . $accessToken,
-                    'Content-Type'  => 'application/json',
-                ],
-                'json' => [
-                    'message' => [
-                        'token' => $token,
-                
-                        'notification' => [
-                            'title' => $title,
-                            'body'  => $body,
-                        ],
-                
-                        'android' => [
+    {
+        try {
+    
+            \Log::info('FCM START');
+    
+            $serviceAccountPath = storage_path('firebase/firebase-key.json');
+            $jsonKey = json_decode(file_get_contents($serviceAccountPath), true);
+    
+            $client = new Client();
+    
+            /*
+            |--------------------------------------------------------------------------
+            | 1. Generate OAuth Token
+            |--------------------------------------------------------------------------
+            */
+            $now = time();
+            $jwtHeader = base64_encode(json_encode([
+                'alg' => 'RS256',
+                'typ' => 'JWT'
+            ]));
+    
+            $jwtClaim = base64_encode(json_encode([
+                'iss' => $jsonKey['client_email'],
+                'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
+                'aud' => 'https://oauth2.googleapis.com/token',
+                'exp' => $now + 3600,
+                'iat' => $now
+            ]));
+    
+            $unsignedJwt = $jwtHeader . '.' . $jwtClaim;
+    
+            openssl_sign($unsignedJwt, $signature, $jsonKey['private_key'], 'sha256');
+            $jwt = $unsignedJwt . '.' . base64_encode($signature);
+    
+            $response = $client->post('https://oauth2.googleapis.com/token', [
+                'form_params' => [
+                    'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                    'assertion' => $jwt,
+                ]
+            ]);
+    
+            $accessToken = json_decode((string) $response->getBody(), true)['access_token'];
+    
+            \Log::info('FCM TOKEN GENERATED');
+    
+            /*
+            |--------------------------------------------------------------------------
+            | 2. Send Notification
+            |--------------------------------------------------------------------------
+            */
+    
+            $projectId = $jsonKey['project_id'];
+    
+            $fcmResponse = $client->post(
+                "https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send",
+                [
+                    'headers' => [
+                        'Authorization' => 'Bearer ' . $accessToken,
+                        'Content-Type'  => 'application/json',
+                    ],
+                    'json' => [
+                        'message' => [
+                            'token' => $token,
+                    
                             'notification' => [
-                                'channel_id' => 'archilance_notification_channel',
-                                'sound' => 'notification_sound',
+                                'title' => $title,
+                                'body'  => $body,
                             ],
-                        ],
-                
-                        // 👇 ADD THIS FOR iOS
-                        'apns' => [
-                            'payload' => [
-                                'aps' => [
-                                    'sound' => 'notification_sound.wav', // 👈 MUST include extension
+                    
+                            'android' => [
+                                'notification' => [
+                                    'channel_id' => 'archilance_notification_channel',
+                                    'sound' => 'notification_sound',
                                 ],
                             ],
-                        ],
-                
-                        'data' => array_merge([
-                            'type' => 'chat',
-                        ], $dataPayload),
+                    
+                            // 👇 ADD THIS FOR iOS
+                            'apns' => [
+                                'payload' => [
+                                    'aps' => [
+                                        'sound' => 'notification_sound.wav', // 👈 MUST include extension
+                                    ],
+                                ],
+                            ],
+                    
+                            'data' => array_merge([
+                                'type' => (string) 'normal',
+                                'notify_type'=> (string) 'chat',
+                                'chat_type' => (string) 'user',
+                                'ref_id' => (string) Auth::user()->id,
+                                'message' => (string) $body
+                            ], collect($dataPayload)->map(fn($v) => (string) $v)->toArray()),
+                        ]
                     ]
                 ]
-            ]
-        );
-
-        \Log::info('FCM SENT SUCCESS', [
-            'response' => (string) $fcmResponse->getBody()
-        ]);
-
-    } catch (\Exception $e) {
-        \Log::error('FCM ERROR: ' . $e->getMessage());
+            );
+    
+            \Log::info('FCM SENT SUCCESS', [
+                'response' => (string) $fcmResponse->getBody()
+            ]);
+    
+        } catch (\Exception $e) {
+            \Log::error('FCM ERROR: ' . $e->getMessage());
+        }
     }
-}
 
     // Update message
     public function update(Request $request, $id)

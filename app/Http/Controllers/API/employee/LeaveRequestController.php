@@ -123,7 +123,8 @@ class LeaveRequestController extends Controller
             'end_date' => 'required|date|after_or_equal:start_date',
         ]);
 
-        $userId = Auth::id();
+        $user = Auth::user();
+        $userId = $user->id;
         $leaveType = $request->leave_type;
         $startDate = Carbon::parse($request->start_date);
         $endDate = Carbon::parse($request->end_date);
@@ -147,19 +148,27 @@ class LeaveRequestController extends Controller
             ], 422);
         }
 
-        // Determine the "leave year" cycle (1 July → 30 June)
-        $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
-        $yearStart = Carbon::create($year, 7, 1)->startOfDay();
-        $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
+        // Determine leave cycle — matches index() logic so dashboard and validation are in sync
+        if ($user->joining_date) {
+            $join = Carbon::parse($user->joining_date);
+            $yearDiff = $startDate->year - $join->year;
+            $yearStart = $join->copy()->addYears($yearDiff)->startOfDay();
+            if ($yearStart->gt($startDate)) {
+                $yearStart->subYear();
+            }
+            $yearEnd = $yearStart->copy()->addYear()->subDay()->endOfDay();
+        } else {
+            // Fallback: fixed July 1 → June 30
+            $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
+            $yearStart = Carbon::create($year, 7, 1)->startOfDay();
+            $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
+        }
 
-        // Count total leave days (weekdays only) of this type within this leave year
+        // Count total leave days (weekdays only) of this type within this cycle
         $usedLeaves = LeaveRequest::where('user_id', $userId)
             ->where('leave_type', $leaveType)
             ->where('status', '!=', 'Rejected')
-            ->where(function ($q) use ($yearStart, $yearEnd) {
-                $q->whereBetween('start_date', [$yearStart, $yearEnd])
-                    ->orWhereBetween('end_date', [$yearStart, $yearEnd]);
-            })
+            ->whereBetween('start_date', [$yearStart, $yearEnd])
             ->get()
             ->sum(function ($leave) {
                 $start = Carbon::parse($leave->start_date);
@@ -172,8 +181,7 @@ class LeaveRequestController extends Controller
         // Check if limit exceeded
         if (($usedLeaves + $daysRequested) > $limits[$leaveType]) {
             return response()->json([
-                'message' => "You have exceeded your {$leaveType} leave limit for this leave year (1 July to 30 June). 
-            Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
+                'message' => "You have exceeded your {$leaveType} leave limit for this leave year. Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
             ], 422);
         }
 
@@ -319,7 +327,8 @@ class LeaveRequestController extends Controller
             'end_date' => 'required|date|after_or_equal:start_date',
         ]);
 
-        $userId = Auth::id();
+        $user = Auth::user();
+        $userId = $user->id;
         $leaveType = $request->leave_type;
         $startDate = Carbon::parse($request->start_date);
         $endDate = Carbon::parse($request->end_date);
@@ -342,25 +351,31 @@ class LeaveRequestController extends Controller
             ], 422);
         }
 
-        // Leave year cycle (1 July → 30 June)
-        $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
-        $yearStart = Carbon::create($year, 7, 1)->startOfDay();
-        $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
+        // Determine leave cycle — same joining-date logic as index() and store()
+        if ($user->joining_date) {
+            $join = Carbon::parse($user->joining_date);
+            $yearDiff = $startDate->year - $join->year;
+            $yearStart = $join->copy()->addYears($yearDiff)->startOfDay();
+            if ($yearStart->gt($startDate)) {
+                $yearStart->subYear();
+            }
+            $yearEnd = $yearStart->copy()->addYear()->subDay()->endOfDay();
+        } else {
+            $year = $startDate->month >= 7 ? $startDate->year : $startDate->year - 1;
+            $yearStart = Carbon::create($year, 7, 1)->startOfDay();
+            $yearEnd = Carbon::create($year + 1, 6, 30)->endOfDay();
+        }
 
         // Recalculate used leaves EXCLUDING this leave
         $usedLeaves = LeaveRequest::where('user_id', $userId)
             ->where('leave_type', $leaveType)
             ->where('status', '!=', 'Rejected')
             ->where('id', '!=', $leave->id)
-            ->where(function ($q) use ($yearStart, $yearEnd) {
-                $q->whereBetween('start_date', [$yearStart, $yearEnd])
-                    ->orWhereBetween('end_date', [$yearStart, $yearEnd]);
-            })
+            ->whereBetween('start_date', [$yearStart, $yearEnd])
             ->get()
             ->sum(function ($leave) {
                 $start = Carbon::parse($leave->start_date);
                 $end = Carbon::parse($leave->end_date);
-
                 return collect(CarbonPeriod::create($start, $end))
                     ->filter(fn($date) => !$date->isWeekend())
                     ->count();
@@ -368,8 +383,7 @@ class LeaveRequestController extends Controller
 
         if (($usedLeaves + $daysRequested) > $limits[$leaveType]) {
             return response()->json([
-                'message' => "You have exceeded your {$leaveType} leave limit for this leave year (1 July to 30 June). 
-            Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
+                'message' => "You have exceeded your {$leaveType} leave limit for this leave year. Used: {$usedLeaves}, Remaining: " . max(0, $limits[$leaveType] - $usedLeaves) . "."
             ], 422);
         }
 

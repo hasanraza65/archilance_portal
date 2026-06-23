@@ -27,12 +27,12 @@ class NoteController extends Controller
     /**
      * Store a newly created note
      */
-   public function store(Request $request)
+    public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'project_id' => 'nullable|integer',
-            'type'       => 'nullable|string',
-            'note_text'  => 'required', // we’ll validate inside
+            'type' => 'nullable|string',
+            'note_text' => 'required', // we’ll validate inside
         ]);
 
         if ($validator->fails()) {
@@ -52,11 +52,11 @@ class NoteController extends Controller
             foreach ($request->note_text as $text) {
                 if (!empty($text)) {
                     $notesData[] = [
-                        'user_id'    => $userId,
+                        'user_id' => $userId,
                         'project_id' => $request->project_id,
-                        'note_text'  => $text,
-                        'status'     => 0,
-                        'type'       => $request->type,
+                        'note_text' => $text,
+                        'status' => 0,
+                        'type' => $request->type,
                         'created_at' => now(),
                         'updated_at' => now(),
                     ];
@@ -75,17 +75,58 @@ class NoteController extends Controller
 
         // ✅ Single note (existing behavior)
         $note = Note::create([
-            'user_id'    => $userId,
+            'user_id' => $userId,
             'project_id' => $request->project_id,
-            'note_text'  => $request->note_text,
-            'status'     => 0,
-            'type'       => $request->type
+            'note_text' => $request->note_text,
+            'status' => 0,
+            'type' => $request->type
         ]);
 
         return response()->json([
             'status' => true,
             'message' => 'Note created successfully',
             'data' => $note
+        ], 201);
+    }
+
+    public function bulkStore(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'notes' => 'required|array|min:1',
+            'notes.*.note_text' => 'required|string',
+            'notes.*.project_id' => 'nullable|integer',
+            'notes.*.type' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $userId = Auth::id();
+
+        $notesData = [];
+
+        foreach ($request->notes as $note) {
+            $notesData[] = [
+                'user_id' => $userId,
+                'project_id' => $note['project_id'] ?? null,
+                'note_text' => $note['note_text'],
+                'status' => 0,
+                'type' => $note['type'] ?? null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+        }
+
+        Note::insert($notesData);
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Notes created successfully',
+            'count' => count($notesData)
         ], 201);
     }
 
@@ -124,7 +165,7 @@ class NoteController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'note_text'  => 'required|string',
+            'note_text' => 'required|string',
             'project_id' => 'nullable|integer',
         ]);
 
@@ -137,7 +178,7 @@ class NoteController extends Controller
 
         $note->update([
             'project_id' => $request->project_id,
-            'note_text'  => $request->note_text
+            'note_text' => $request->note_text
         ]);
 
         return response()->json([
@@ -176,7 +217,7 @@ class NoteController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'note_id' => 'required|integer|exists:notes,id',
-            'status'  => 'required|integer|in:0,1'
+            'status' => 'required|integer|in:0,1'
         ]);
 
         if ($validator->fails()) {
@@ -188,16 +229,16 @@ class NoteController extends Controller
 
         $note = Note::find($request->note_id);
 
-       
+
 
         $note->update([
             'status' => $request->status
         ]);
 
         return response()->json([
-            'status'  => true,
+            'status' => true,
             'message' => 'Status updated successfully',
-            'data'    => $note
+            'data' => $note
         ], 200);
     }
 }
