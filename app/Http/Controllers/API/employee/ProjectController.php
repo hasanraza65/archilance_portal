@@ -147,32 +147,20 @@ class ProjectController extends Controller
     {
         $user = Auth::user();
         $task_status = $request->task_status ?? 'On Hold';
-        $page = $request->input('page', 1);
+        $page = max(1, (int) $request->input('page', 1));
         $perPage = 10;
 
         $isPrivileged = ($user->employee_type == "Manager" || $user->employee_type == "Supervisor" || $user->employee_type == "Executive")
             && !$request->boolean('assigned_me');
 
-        $query = ProjectTask::with([
-            'project',
-            'assignees:id,employee_id,task_id',
-            'assignees.user:id,name,profile_pic',
-            'creator:id,name,profile_pic',
-            'attachments',
-            'subTasks',
-            'subTasks.assignees:id,employee_id,task_id',
-            'subTasks.assignees.user:id,name,profile_pic',
-            'subTasks.creator:id,name,profile_pic',
-            'subTasks.attachments',
-        ])
+        // Base parent-task query (same filters as before, but NO heavy relations yet)
+        $baseParentQuery = ProjectTask::query()
             ->whereNull('parent_task_id')
             ->where('task_status', $task_status);
 
         if (!$isPrivileged) {
             $userId = $user->id;
-
-            // Subqueries instead of two separate pluck() calls
-            $query->where(function ($q) use ($userId) {
+            $baseParentQuery->where(function ($q) use ($userId) {
                 $q->whereIn('project_id', function ($sq) use ($userId) {
                     $sq->select('project_id')
                         ->from('project_assignees')
@@ -185,35 +173,70 @@ class ProjectController extends Controller
             });
         }
 
-        // ✅ Get ALL tasks (no paginate here, because subtasks expand row count)
-        $mainTasks = $query->get();
+        // Phase 1: cheap skeleton — only IDs, to build the flat (expanded) row list
+        $parentIds = (clone $baseParentQuery)->orderBy('id')->pluck('id');
 
-        // --- Build flat result first ---
-        $result = [];
-        foreach ($mainTasks as $task) {
-            if ($task->subTasks->isNotEmpty()) {
-                foreach ($task->subTasks as $sub) {
-                    $result[] = [
-                        'project' => $task->project,
-                        'task' => $task,
-                        'sub_task' => $sub,
-                    ];
+        $subSkeleton = $parentIds->isEmpty()
+            ? collect()
+            : ProjectTask::whereIn('parent_task_id', $parentIds)
+                ->orderBy('id')
+                ->get(['id', 'parent_task_id'])
+                ->groupBy('parent_task_id');
+
+        // Build flat-row skeleton (identical expansion order to the previous implementation)
+        $flat = [];
+        foreach ($parentIds as $pid) {
+            $subs = $subSkeleton->get($pid);
+            if ($subs && $subs->isNotEmpty()) {
+                foreach ($subs as $s) {
+                    $flat[] = ['task_id' => $pid, 'sub_id' => $s->id];
                 }
             } else {
-                $result[] = [
-                    'project' => $task->project,
-                    'task' => $task,
-                    'sub_task' => null,
-                ];
+                $flat[] = ['task_id' => $pid, 'sub_id' => null];
             }
         }
 
-        // ✅ Paginate the flat result array AFTER expansion
-        $total = count($result);
+        $total = count($flat);
         $offset = ($page - 1) * $perPage;
-        $paginated = array_slice($result, $offset, $perPage);
+        $pageRows = array_slice($flat, $offset, $perPage);
 
-        // ✅ Return same data shape + pagination meta
+        // Phase 2: heavy-load ONLY the parent tasks needed for this page
+        $neededParentIds = array_values(array_unique(array_map(fn($r) => $r['task_id'], $pageRows)));
+
+        $parents = collect();
+        if (!empty($neededParentIds)) {
+            $parents = ProjectTask::with([
+                'project',
+                'assignees:id,employee_id,task_id',
+                'assignees.user:id,name,profile_pic',
+                'creator:id,name,profile_pic',
+                'attachments',
+                'subTasks',
+                'subTasks.assignees:id,employee_id,task_id',
+                'subTasks.assignees.user:id,name,profile_pic',
+                'subTasks.creator:id,name,profile_pic',
+                'subTasks.attachments',
+            ])->whereIn('id', $neededParentIds)->get()->keyBy('id');
+        }
+
+        // Rebuild result rows in exact page order — same shape as before
+        $paginated = [];
+        foreach ($pageRows as $row) {
+            $task = $parents->get($row['task_id']);
+            if (!$task) {
+                continue;
+            }
+            $sub = $row['sub_id'] !== null
+                ? $task->subTasks->firstWhere('id', $row['sub_id'])
+                : null;
+
+            $paginated[] = [
+                'project' => $task->project,
+                'task' => $task,
+                'sub_task' => $sub,
+            ];
+        }
+
         return response()->json([
             'data' => $paginated,
             'current_page' => (int) $page,
@@ -233,27 +256,16 @@ class ProjectController extends Controller
             ? Carbon::parse($request->input('date'))->startOfDay()
             : Carbon::today();
 
-        $page = $request->input('page', 1);
+        $page = max(1, (int) $request->input('page', 1));
         $perPage = 10;
 
-        // --- Privilege check (same logic as projectsWithTasks) ---
         $isPrivileged = ($user->employee_type == "Manager"
             || $user->employee_type == "Supervisor"
             || $user->employee_type == "Executive")
             && !$request->boolean('assigned_me');
 
-        $query = ProjectTask::with([
-            'project',
-            'assignees:id,employee_id,task_id',
-            'assignees.user:id,name,profile_pic',
-            'creator:id,name,profile_pic',
-            'attachments',
-            'subTasks',
-            'subTasks.assignees:id,employee_id,task_id',
-            'subTasks.assignees.user:id,name,profile_pic',
-            'subTasks.creator:id,name,profile_pic',
-            'subTasks.attachments',
-        ])
+        // Base parent-task query (filters only, no heavy relations yet)
+        $baseParentQuery = ProjectTask::query()
             ->whereNull('parent_task_id')
             ->where(function ($q) use ($targetDate) {
                 $q->whereDate('start_date', '<=', $targetDate)
@@ -262,8 +274,7 @@ class ProjectController extends Controller
 
         if (!$isPrivileged) {
             $userId = $user->id;
-
-            $query->where(function ($q) use ($userId) {
+            $baseParentQuery->where(function ($q) use ($userId) {
                 $q->whereIn('project_id', function ($sq) use ($userId) {
                     $sq->select('project_id')
                         ->from('project_assignees')
@@ -276,47 +287,86 @@ class ProjectController extends Controller
             });
         }
 
-        $mainTasks = $query->get();
+        // Phase 1: cheap skeleton — parent ids + project ids, and subtask ids
+        $parentSkeleton = (clone $baseParentQuery)->orderBy('id')->get(['id', 'project_id']);
+        $parentIds = $parentSkeleton->pluck('id');
 
-        // --- Expand tasks + subtasks into flat rows (same pattern as projectsWithTasks) ---
-        $rows = [];
-        foreach ($mainTasks as $task) {
-            if ($task->subTasks->isNotEmpty()) {
-                foreach ($task->subTasks as $sub) {
-                    $rows[] = [
-                        'project' => $task->project,
-                        'task' => $task,
-                        'sub_task' => $sub,
-                    ];
+        $subSkeleton = $parentIds->isEmpty()
+            ? collect()
+            : ProjectTask::whereIn('parent_task_id', $parentIds)
+                ->orderBy('id')
+                ->get(['id', 'parent_task_id'])
+                ->groupBy('parent_task_id');
+
+        // Build flat-row skeleton (same expansion order as before)
+        $flat = [];
+        foreach ($parentIds as $pid) {
+            $subs = $subSkeleton->get($pid);
+            if ($subs && $subs->isNotEmpty()) {
+                foreach ($subs as $s) {
+                    $flat[] = ['task_id' => $pid, 'sub_id' => $s->id];
                 }
             } else {
-                $rows[] = [
-                    'project' => $task->project,
-                    'task' => $task,
-                    'sub_task' => null,
-                ];
+                $flat[] = ['task_id' => $pid, 'sub_id' => null];
             }
         }
 
-        // --- Paginate the flat rows ---
-        $total = count($rows);
+        $total = count($flat);
         $offset = ($page - 1) * $perPage;
-        $paginated = array_slice($rows, $offset, $perPage);
+        $pageRows = array_slice($flat, $offset, $perPage);
 
-        // --- Summary counts for the date (before pagination) ---
-        $uniqueTaskIds = collect($rows)->pluck('task.id')->unique()->count();
-        $uniqueSubIds = collect($rows)->filter(fn($r) => $r['sub_task'] !== null)
-            ->pluck('sub_task.id')->unique()->count();
-        $uniqueProjectIds = collect($rows)->pluck('project.id')->unique()->count();
+        // --- Summary counts (computed from the cheap skeleton, before pagination) ---
+        $totalSubIds = 0;
+        foreach ($subSkeleton as $group) {
+            $totalSubIds += $group->count();
+        }
+        $summary = [
+            'total_projects' => $parentSkeleton->pluck('project_id')->unique()->count(),
+            'total_tasks' => $parentIds->count(),
+            'total_sub_tasks' => $totalSubIds,
+            'total_rows' => $total,
+        ];
+
+        // Phase 2: heavy-load ONLY the parent tasks needed for this page
+        $neededParentIds = array_values(array_unique(array_map(fn($r) => $r['task_id'], $pageRows)));
+
+        $parents = collect();
+        if (!empty($neededParentIds)) {
+            $parents = ProjectTask::with([
+                'project',
+                'assignees:id,employee_id,task_id',
+                'assignees.user:id,name,profile_pic',
+                'creator:id,name,profile_pic',
+                'attachments',
+                'subTasks',
+                'subTasks.assignees:id,employee_id,task_id',
+                'subTasks.assignees.user:id,name,profile_pic',
+                'subTasks.creator:id,name,profile_pic',
+                'subTasks.attachments',
+            ])->whereIn('id', $neededParentIds)->get()->keyBy('id');
+        }
+
+        // Rebuild rows in exact page order — same shape as before
+        $paginated = [];
+        foreach ($pageRows as $row) {
+            $task = $parents->get($row['task_id']);
+            if (!$task) {
+                continue;
+            }
+            $sub = $row['sub_id'] !== null
+                ? $task->subTasks->firstWhere('id', $row['sub_id'])
+                : null;
+
+            $paginated[] = [
+                'project' => $task->project,
+                'task' => $task,
+                'sub_task' => $sub,
+            ];
+        }
 
         return response()->json([
-            'date' => $targetDate->toDateString(),   // "2026-05-19"
-            'summary' => [
-                'total_projects' => $uniqueProjectIds,
-                'total_tasks' => $uniqueTaskIds,
-                'total_sub_tasks' => $uniqueSubIds,
-                'total_rows' => $total,                   // expanded row count
-            ],
+            'date' => $targetDate->toDateString(),
+            'summary' => $summary,
             'data' => $paginated,
             'current_page' => (int) $page,
             'per_page' => $perPage,
@@ -385,6 +435,12 @@ class ProjectController extends Controller
 
     public function show(Request $request, $id)
     {
+
+        // Lightweight mode (used by task-detail breadcrumb) — skip heavy task + hours computation
+        if ($request->boolean('light')) {
+            $project = Project::with(['customer:id,name,profile_pic'])->findOrFail($id);
+            return response()->json($project);
+        }
         $project = Project::with([
             'projectAssignees',
             'projectAssignees.user',

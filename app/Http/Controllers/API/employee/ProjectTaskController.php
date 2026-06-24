@@ -25,7 +25,7 @@ class ProjectTaskController extends Controller
     // ✅ Get all tasks (optionally filtered by project)
     public function index(Request $request)
     {
-        $query = ProjectTask::with(['assignees', 'assignees.user', 'comments', 'creator', 'attachments']);
+        $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments']);
 
         if ($request->has('project_id')) {
             $query->where('project_id', $request->project_id);
@@ -43,7 +43,6 @@ class ProjectTaskController extends Controller
         $query = ProjectTask::with([
             'assignees',
             'assignees.user',
-            'comments',
             'creator',
             'attachments',
             'parentTask'
@@ -142,9 +141,6 @@ class ProjectTaskController extends Controller
         $task = ProjectTask::with([
             'assignees',
             'assignees.user',
-            'comments',
-            'comments.sender',
-            'comments.commentAttachments',
             'subTasks',
             'subTasks.creator',
             'attachments',
