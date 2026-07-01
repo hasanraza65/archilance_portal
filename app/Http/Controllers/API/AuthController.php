@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Hash;
 use App\Models\User;
 use App\Models\Notification;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use Auth;
 
 
@@ -80,6 +82,55 @@ class AuthController extends Controller
         ]);
     }
 
+
+    public function forgotPassword(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $user = User::where('email', $request->email)->first();
+
+        if (!$user) {
+            return response()->json([
+                'message' => 'No account found with this email address.'
+            ], 404);
+        }
+
+        // Generate a new temporary password (same convention as team invites)
+        $temporaryPassword = Str::random(8);
+
+        // Send the recovery email FIRST — only persist the new password if the mail
+        // actually goes out, so a mail failure can never lock the user out.
+        try {
+            Mail::send('mails.forgot-password', [
+                'name' => $user->name,
+                'email' => $user->email,
+                'password' => $temporaryPassword,
+            ], function ($message) use ($user) {
+                $message->to($user->email)
+                    ->from('info@archilance.net', 'Archilance LLC')
+                    ->subject('Your Archilance Password Has Been Reset');
+            });
+        } catch (\Throwable $e) {
+            \Log::error('Forgot password mail failed: ' . $e->getMessage());
+            return response()->json([
+                'message' => 'Unable to send the recovery email right now. Please try again later.'
+            ], 500);
+        }
+
+        $user->password = Hash::make($temporaryPassword);
+        $user->is_default_pass = 1; // flag as temporary — prompts a change after login
+        $user->save();
+
+        return response()->json([
+            'message' => 'A new temporary password has been sent to your email address.'
+        ]);
+    }
 
     public function logout(Request $request)
     {

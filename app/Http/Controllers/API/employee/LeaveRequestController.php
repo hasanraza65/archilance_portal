@@ -70,6 +70,7 @@ class LeaveRequestController extends Controller
             }
 
             $type = strtolower(trim($req->leave_type));
+            $mapped = null;
             switch ($type) {
                 case 'sick':
                 case 'medical leave':
@@ -78,13 +79,18 @@ class LeaveRequestController extends Controller
                 case 'annual':
                     $mapped = 'annual';
                     break;
+                case 'additional':
+                    // counted separately below for eligible users
+                    break;
                 case 'casual':
                 default:
                     $mapped = 'casual';
                     break;
             }
 
-            $typeCounts[$mapped] += $days;
+            if ($mapped !== null) {
+                $typeCounts[$mapped] += $days;
+            }
         }
 
         // Add additional leave count for eligible users (all-time, no cycle)
@@ -493,9 +499,13 @@ class LeaveRequestController extends Controller
             ? $sender_name . ' updated leave request - Archilance LLC'
             : $sender_name . ' request for leaves - Archilance LLC';
 
-        \Mail::send('mails.new-leave-request', compact('sender_name', 'leaveType', 'endDate', 'startDate'), function ($message) use ($sender_name, $allEmails, $subject) {
+       \Mail::send(
+        'mails.new-leave-request',
+        compact('sender_name', 'leaveType', 'endDate', 'startDate'),
+        function ($message) use ($sender_name, $allEmails, $subject) {
             $message->from("info@archilance.net", $sender_name)
-                ->subject($subject);
+                    ->to($allEmails)
+                    ->subject($subject);
         });
     }
 }

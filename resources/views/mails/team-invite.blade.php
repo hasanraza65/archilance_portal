@@ -32,7 +32,7 @@
         @endif
 
         <p>
-            <a href="https://portal.archilance.net/" 
+            <a href="https://archilance.org/" 
                style="display: inline-block; padding: 10px 20px; background: #4CAF50; color: #fff; 
                       text-decoration: none; border-radius: 4px;">
                 Login to Your Account
