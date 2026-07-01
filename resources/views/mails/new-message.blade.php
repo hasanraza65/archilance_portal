@@ -23,7 +23,7 @@
         </p>
 
         <p>
-            <a href="https://portal.archilance.net/chat" 
+            <a href="https://archilance.org/chat" 
                style="display: inline-block; padding: 10px 20px; background: #1E1E1E; color: #fff; 
                       text-decoration: none; border-radius: 4px;">
                 View Message

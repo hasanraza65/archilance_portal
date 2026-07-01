@@ -22,6 +22,7 @@ use App\Http\Controllers\OneDriveAuthController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [AuthController::class, 'register']);
+Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
 
 Route::post('/slack/interactions', [SlackController::class, 'handle']);
 
