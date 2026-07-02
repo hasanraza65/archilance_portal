@@ -122,7 +122,8 @@ class UserManagementController extends Controller
             'user_role' => $roleId,
             'employee_type' => $request->employee_type ?? '',
             'joining_date' => $request->joining_date,
-            'subscription_from' => $request->subscription_from ?? null
+            'subscription_from' => $request->subscription_from ?? null,
+            'internee_manager_id' => $request->internee_manager_id
         ]);
 
         return response()->json($user, 201);
@@ -168,7 +169,8 @@ class UserManagementController extends Controller
             'phone' => $request->phone,
             'employee_type' => $request->employee_type,
             'joining_date' => $request->joining_date,
-            'subscription_from' => $request->subscription_from ?? null
+            'subscription_from' => $request->subscription_from ?? null,
+            'internee_manager_id' => $request->internee_manager_id
         ];
     
         // Update password only if provided

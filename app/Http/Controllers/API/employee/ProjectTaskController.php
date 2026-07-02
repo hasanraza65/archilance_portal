@@ -25,14 +25,39 @@ class ProjectTaskController extends Controller
     // ✅ Get all tasks (optionally filtered by project)
     public function index(Request $request)
     {
-        $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments']);
+        $user = Auth::user();
 
-        if ($request->has('project_id')) {
-            $query->where('project_id', $request->project_id);
+        if($user->employee_type != "Internee"){
+
+            $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments']);
+
+            if ($request->has('project_id')) {
+                $query->where('project_id', $request->project_id);
+            }
+
+            $tasks = $query->whereNull('parent_task_id')->get();
+
+        }else{
+
+            $userId = $user->id;
+
+            $taskIds = DB::table('task_assignees')
+                ->join('project_tasks', 'task_assignees.task_id', '=', 'project_tasks.id')
+                ->where('task_assignees.employee_id', $userId)
+                ->whereNull('project_tasks.deleted_at')
+                ->pluck('project_tasks.id');
+
+             $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments']);
+
+            if ($request->has('project_id')) {
+                $query->where('project_id', $request->project_id);
+            }
+
+            $tasks = $query->whereNull('parent_task_id')->whereIn('id',$taskIds)->get();
+
         }
 
-        $tasks = $query->whereNull('parent_task_id')->get();
-
+      
         return response()->json($tasks);
     }
 
@@ -136,84 +161,137 @@ class ProjectTaskController extends Controller
     }
 
     // ✅ Show single task
-    public function show($id)
-    {
+   public function show($id)
+{
+    $user = Auth::user();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Internee View
+    |--------------------------------------------------------------------------
+    */
+    if ($user->employee_type === 'Internee') {
+
         $task = ProjectTask::with([
-            'assignees',
-            'assignees.user',
-            'subTasks',
-            'subTasks.creator',
             'attachments',
-            'allBriefs',
-            'allBriefs.attachments',
-            'allNotes'
-        ])->findOrFail($id);
-
-        // 1. ONE query: all sessions for this task (across all employees)
-        $allSessions = WorkSession::where('task_id', $task->id)->get();
-
-        // 2. ONE query: all adjustments for those sessions
-        $allSessionIds        = $allSessions->pluck('id')->toArray();
-        $adjustmentsBySession = !empty($allSessionIds)
-            ? DB::table('session_time_adjustments')
-                ->whereIn('session_id', $allSessionIds)
-                ->get()
-                ->groupBy('session_id')
-            : collect();
-
-        // 3. Group sessions by employee; compute per-employee in PHP — zero extra queries
-        $sessionsByEmployee = $allSessions->groupBy('user_id');
-
-        $assigneesWithHours = [];
-        foreach ($task->assignees as $assignee) {
-            $employeeId   = $assignee->employee_id;
-            $sessions     = $sessionsByEmployee->get($employeeId, collect());
-            $totalSeconds = 0;
-
-            foreach ($sessions as $session) {
-                try {
-                    $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
-                    $sessionEnd   = is_null($session->end_time)
-                        ? now()
-                        : Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
-
-                    $sessionDuration = $sessionEnd->diffInSeconds($sessionStart);
-                    if ($sessionDuration < 0) {
-                        $sessionDuration = -$sessionDuration;
-                    }
-
-                    $adjustmentSeconds = 0;
-                    foreach ($adjustmentsBySession->get($session->id, collect()) as $adj) {
-                        if (empty($adj->start_time) || empty($adj->end_time)) continue;
-                        try {
-                            $dur = Carbon::parse($adj->end_time)->diffInSeconds(Carbon::parse($adj->start_time));
-                            $adjustmentSeconds += ($dur < 0 ? -$dur : $dur);
-                        } catch (\Exception $e) {
-                            continue;
-                        }
-                    }
-
-                    $netSeconds = $sessionDuration - $adjustmentSeconds;
-                    if ($netSeconds > 0) {
-                        $totalSeconds += $netSeconds;
-                    }
-                } catch (\Exception $e) {
-                    continue;
-                }
+            'subTasks' => function ($query) use ($user) {
+                $query->with([
+                    'assignees',
+                    'assignees.user',
+                    'creator',
+                    'attachments'
+                ])
+                ->whereHas('assignees', function ($q) use ($user) {
+                    $q->where('employee_id', $user->id);
+                });
             }
-
-            $assigneesWithHours[] = [
-                'assignee'                       => $assignee,
-                'user'                           => $assignee->user,
-                'total_working_hours'            => $totalSeconds,
-                'total_working_hours_formatted'  => $this->formatHours($totalSeconds),
-            ];
-        }
-
-        $task->assignees_with_hours = $assigneesWithHours;
+        ])->findOrFail($id);
 
         return response()->json($task);
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Normal View (Existing Logic)
+    |--------------------------------------------------------------------------
+    */
+    $task = ProjectTask::with([
+        'assignees',
+        'assignees.user',
+        'subTasks',
+        'subTasks.creator',
+        'attachments',
+        'allBriefs',
+        'allBriefs.attachments',
+        'allNotes'
+    ])->findOrFail($id);
+
+    // 1. ONE query: all sessions for this task (across all employees)
+    $allSessions = WorkSession::where('task_id', $task->id)->get();
+
+    // 2. ONE query: all adjustments for those sessions
+    $allSessionIds = $allSessions->pluck('id')->toArray();
+
+    $adjustmentsBySession = !empty($allSessionIds)
+        ? DB::table('session_time_adjustments')
+            ->whereIn('session_id', $allSessionIds)
+            ->get()
+            ->groupBy('session_id')
+        : collect();
+
+    // 3. Group sessions by employee; compute per-employee in PHP
+    $sessionsByEmployee = $allSessions->groupBy('user_id');
+
+    $assigneesWithHours = [];
+
+    foreach ($task->assignees as $assignee) {
+
+        $employeeId = $assignee->employee_id;
+        $sessions = $sessionsByEmployee->get($employeeId, collect());
+
+        $totalSeconds = 0;
+
+        foreach ($sessions as $session) {
+            try {
+
+                $sessionStart = Carbon::parse(
+                    $session->start_date . ' ' . $session->start_time
+                );
+
+                $sessionEnd = is_null($session->end_time)
+                    ? now()
+                    : Carbon::parse(
+                        ($session->end_date ?? $session->start_date) . ' ' . $session->end_time
+                    );
+
+                $sessionDuration = $sessionEnd->diffInSeconds($sessionStart);
+
+                if ($sessionDuration < 0) {
+                    $sessionDuration = -$sessionDuration;
+                }
+
+                $adjustmentSeconds = 0;
+
+                foreach ($adjustmentsBySession->get($session->id, collect()) as $adj) {
+
+                    if (empty($adj->start_time) || empty($adj->end_time)) {
+                        continue;
+                    }
+
+                    try {
+                        $dur = Carbon::parse($adj->end_time)
+                            ->diffInSeconds(Carbon::parse($adj->start_time));
+
+                        $adjustmentSeconds += ($dur < 0 ? -$dur : $dur);
+
+                    } catch (\Exception $e) {
+                        continue;
+                    }
+                }
+
+                $netSeconds = $sessionDuration - $adjustmentSeconds;
+
+                if ($netSeconds > 0) {
+                    $totalSeconds += $netSeconds;
+                }
+
+            } catch (\Exception $e) {
+                continue;
+            }
+        }
+
+        $assigneesWithHours[] = [
+            'assignee'                      => $assignee,
+            'user'                          => $assignee->user,
+            'total_working_hours'           => $totalSeconds,
+            'total_working_hours_formatted' => $this->formatHours($totalSeconds),
+        ];
+    }
+
+    $task->assignees_with_hours = $assigneesWithHours;
+
+    return response()->json($task);
+}
 
 
     // Helper method to format seconds into hours and minutes
