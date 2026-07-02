@@ -121,6 +121,7 @@ class UserManagementController extends Controller
             'password' => bcrypt($request->password),
             'user_role' => $roleId,
             'employee_type' => $request->employee_type ?? '',
+            'internee_manager_id' => $request->internee_manager_id ?? null,
             'subscription_from' => $request->subscription_from ?? null
         ]);
 
@@ -174,6 +175,7 @@ class UserManagementController extends Controller
             'username' => $request->username,
             'phone' => $request->phone,
             'employee_type' => $request->employee_type,
+            'internee_manager_id' => $request->internee_manager_id,
             'subscription_from' => $request->subscription_from ?? null
         ];
 

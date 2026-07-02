@@ -25,6 +25,10 @@ class ProjectController extends Controller
             return $this->indexForElectron($request, $user);
         }
 
+        if($user->employee_type === "Internee"){
+            return $this->interneeProjects($request, $user);
+        }
+
         $statusOrder = [
             'On Hold' => 1,
             'Backlog' => 2,
@@ -95,6 +99,39 @@ class ProjectController extends Controller
         }
 
         return response()->json($grouped);
+    }
+
+    public function interneeProjects(Request $request, $user){
+
+         $withRelations = [
+            'customer:id,name,profile_pic',
+            'projectAssignees:id,employee_id,project_id',
+            'projectAssignees.user:id,name,profile_pic',
+        ];
+
+        $userId = $user->id;
+
+        // Single join query instead of 3 sequential queries
+        $linkedProjectIds = ProjectAssignee::where('employee_id', $userId)
+            ->pluck('project_id');
+
+        $taskProjectIds = DB::table('task_assignees')
+            ->join('project_tasks', 'task_assignees.task_id', '=', 'project_tasks.id')
+            ->where('task_assignees.employee_id', $userId)
+            ->whereNull('project_tasks.deleted_at')
+            ->pluck('project_tasks.project_id');
+
+        $all_project_ids = $linkedProjectIds->merge($taskProjectIds)->unique()->values()->toArray();
+
+        $projects = Project::latest()
+                ->with($withRelations)
+                ->whereIn('id', $all_project_ids)
+                ->when($request->customer_id, function ($query) use ($request) {
+                    $query->where('customer_id', $request->customer_id);
+                })
+                ->get();
+
+        return response()->json($projects);
     }
 
 

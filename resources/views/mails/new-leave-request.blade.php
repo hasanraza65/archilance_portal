@@ -28,7 +28,7 @@
         
 
         <p>
-            <a href="https://archilance.org/employeeleaves" 
+            <a href="https://archilance.org/leaves" 
                style="display: inline-block; padding: 10px 20px; background: #1E1E1E; color: #fff; 
                       text-decoration: none; border-radius: 4px;">
                 View Leave Requests
