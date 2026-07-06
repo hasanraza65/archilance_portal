@@ -83,6 +83,30 @@ class User extends Authenticatable
         return $this->hasMany(WorkSession::class);
     }
 
+    // The manager assigned to this intern (only meaningful when employee_type === 'Internee')
+    public function internManager()
+    {
+        return $this->belongsTo(User::class, 'internee_manager_id');
+    }
+
+    // Interns managed by this user
+    public function internees()
+    {
+        return $this->hasMany(User::class, 'internee_manager_id');
+    }
+
+    // Ratings this user gave as a manager
+    public function interneeRatingsGiven()
+    {
+        return $this->hasMany(InterneeRating::class, 'manager_id');
+    }
+
+    // Ratings this user received as an intern
+    public function interneeRatingsReceived()
+    {
+        return $this->hasMany(InterneeRating::class, 'internee_id');
+    }
+
 
    public function calculateWorkedTime($startDate, $endDate)
 {

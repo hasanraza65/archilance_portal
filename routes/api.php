@@ -340,6 +340,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/fetch-activity-logs/{id}', [App\Http\Controllers\API\employee\WorkSessionController::class, 'fetchActivityLogs']);
 
+        // Internee rating module
+        Route::get('/my-internees', [App\Http\Controllers\API\employee\InterneeRatingController::class, 'myInternees']);
+        Route::get('/internee-rating-pending-check', [App\Http\Controllers\API\employee\InterneeRatingController::class, 'pendingCheck']);
+        Route::resource('/internee-rating', App\Http\Controllers\API\employee\InterneeRatingController::class);
+
     });
 
 
