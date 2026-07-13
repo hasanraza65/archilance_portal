@@ -61,69 +61,96 @@ class ProjectController extends Controller
 
     public function projectsWithTasks(Request $request)
     {
-        $statusOrder = [
-            'On Hold' => 1,
-            'Backlog' => 2,
-            'Awaiting Info' => 3,
-            'In Progress' => 4,
-            'In-house review' => 5,
-            'Client Review' => 6,
-            'Completed' => 7,
-        ];
+        $page    = max(1, (int) $request->input('page', 1));
+        $perPage = 10;
 
-        $query = ProjectTask::with([
-            'project',
-            'assignees:id,employee_id,task_id',
-            'assignees.user:id,name,profile_pic',
-            'creator:id,name,profile_pic',
-            'attachments',
-            'subTasks',
-            'subTasks.assignees:id,employee_id,task_id',
-            'subTasks.assignees.user:id,name,profile_pic',
-            'subTasks.creator:id,name,profile_pic',
-            'subTasks.attachments',
-        ])
+        // Ordering that preserves the previous status-priority sort, then id
+        $statusPriority = "FIELD(task_status, 'On Hold','Backlog','Awaiting Info','In Progress','In-house review','Client Review','Completed')";
+
+        // Base parent-task query (filters only, no heavy relations yet)
+        $baseParentQuery = ProjectTask::query()
             ->whereNull('parent_task_id')
             ->where('task_status', '!=', 'Todo');
 
         if ($request->filled('task_status')) {
-            $query->where('task_status', $request->task_status);
+            $baseParentQuery->where('task_status', $request->task_status);
         }
 
-        $mainTasks = $query->get();
+        // Phase 1: cheap skeleton — parent ids in the exact display order
+        $parentIds = (clone $baseParentQuery)
+            ->orderByRaw($statusPriority)
+            ->orderBy('id')
+            ->pluck('id');
 
-        $result = [];
-        foreach ($mainTasks as $task) {
-            if ($task->subTasks->isNotEmpty()) {
-                foreach ($task->subTasks as $sub) {
-                    $result[] = [
-                        'project' => $task->project,
-                        'task' => $task,
-                        'sub_task' => $sub,
-                    ];
+        $subSkeleton = $parentIds->isEmpty()
+            ? collect()
+            : ProjectTask::whereIn('parent_task_id', $parentIds)
+                ->orderBy('id')
+                ->get(['id', 'parent_task_id'])
+                ->groupBy('parent_task_id');
+
+        // Build flat-row skeleton (identical expansion order to the previous implementation)
+        $flat = [];
+        foreach ($parentIds as $pid) {
+            $subs = $subSkeleton->get($pid);
+            if ($subs && $subs->isNotEmpty()) {
+                foreach ($subs as $s) {
+                    $flat[] = ['task_id' => $pid, 'sub_id' => $s->id];
                 }
             } else {
-                $result[] = [
-                    'project' => $task->project,
-                    'task' => $task,
-                    'sub_task' => null,
-                ];
+                $flat[] = ['task_id' => $pid, 'sub_id' => null];
             }
         }
 
-        // Sort the final result array by task status in the desired order
-        usort($result, function ($a, $b) use ($statusOrder) {
-            // Determine which status to use for sorting
-            $statusA = $a['sub_task'] ? $a['sub_task']->task_status : $a['task']->task_status;
-            $statusB = $b['sub_task'] ? $b['sub_task']->task_status : $b['task']->task_status;
+        $total    = count($flat);
+        $offset   = ($page - 1) * $perPage;
+        $pageRows = array_slice($flat, $offset, $perPage);
 
-            $orderA = $statusOrder[$statusA] ?? 999;
-            $orderB = $statusOrder[$statusB] ?? 999;
+        // Phase 2: heavy-load ONLY the parent tasks needed for this page
+        $neededParentIds = array_values(array_unique(array_map(fn($r) => $r['task_id'], $pageRows)));
 
-            return $orderA <=> $orderB;
-        });
+        $parents = collect();
+        if (!empty($neededParentIds)) {
+            $parents = ProjectTask::with([
+                'project',
+                'assignees:id,employee_id,task_id',
+                'assignees.user:id,name,profile_pic',
+                'creator:id,name,profile_pic',
+                'attachments',
+                'subTasks',
+                'subTasks.assignees:id,employee_id,task_id',
+                'subTasks.assignees.user:id,name,profile_pic',
+                'subTasks.creator:id,name,profile_pic',
+                'subTasks.attachments',
+            ])->whereIn('id', $neededParentIds)->get()->keyBy('id');
+        }
 
-        return response()->json($result);
+        // Rebuild result rows in exact page order — same shape as before
+        $paginated = [];
+        foreach ($pageRows as $row) {
+            $task = $parents->get($row['task_id']);
+            if (!$task) {
+                continue;
+            }
+            $sub = $row['sub_id'] !== null
+                ? $task->subTasks->firstWhere('id', $row['sub_id'])
+                : null;
+
+            $paginated[] = [
+                'project'  => $task->project,
+                'task'     => $task,
+                'sub_task' => $sub,
+            ];
+        }
+
+        return response()->json([
+            'data'         => $paginated,
+            'current_page' => (int) $page,
+            'per_page'     => $perPage,
+            'total'        => $total,
+            'last_page'    => (int) ceil($total / $perPage),
+            'has_more'     => ($offset + $perPage) < $total,
+        ]);
     }
 
 
@@ -301,6 +328,12 @@ class ProjectController extends Controller
 
     public function show(Request $request, $id)
     {
+        // Lightweight mode (used by task-detail breadcrumb) — skip heavy task + hours computation
+        if ($request->boolean('light')) {
+            $project = Project::with(['customer:id,name,profile_pic'])->findOrFail($id);
+            return response()->json($project);
+        }
+
         $project = Project::with([
             'projectAssignees',
             'projectAssignees.user',
@@ -316,199 +349,119 @@ class ProjectController extends Controller
             'allNotes'
         ])->findOrFail($id);
 
-        $taskHours = [];
-
-        // 1. Calculate hours for every task (including child tasks)
-        // Get date filters (if supplied)
         $startDateFilter = $request->summary_start_date ?? null;
-        $endDateFilter = $request->summary_end_date ?? null;
-        
-      //  \Log::info($project->allTasks);
+        $endDateFilter   = $request->summary_end_date   ?? null;
 
-       foreach ($project->allTasks as $task) {
-            $taskHours[$task->id] = $this->calculateEmployeeTaskHours(
-                null,
-                $task->id,
-                $startDateFilter,
-                $endDateFilter
-            );
-        }
-        // 2. Roll up child tasks into parent
-        $rolledUpHours = [];
-        foreach ($project->allTasks as $task) {
-            $hours = $taskHours[$task->id] ?? 0;
+        $allTaskIds = $project->allTasks->pluck('id')->toArray();
+        $taskHours  = [];
 
-            if ($task->parent_task_id) {
-                // add to parent’s hours
-               // \Log::info('child task hours '.$hours.' for id '.$task->id);
-                $rolledUpHours[$task->parent_task_id] = ($rolledUpHours[$task->parent_task_id] ?? 0) + $hours;
-            } else {
-                // parent task itself
-                $rolledUpHours[$task->id] = ($rolledUpHours[$task->id] ?? 0) + $hours;
+        if (!empty($allTaskIds)) {
+            // 1. ONE query: all sessions for all tasks in this project
+            $sessionsQuery = WorkSession::whereIn('task_id', $allTaskIds);
+
+            if ($startDateFilter && $endDateFilter) {
+                $sessionsQuery->where(function ($q) use ($startDateFilter, $endDateFilter) {
+                    $q->whereBetween('start_date', [$startDateFilter, $endDateFilter])
+                        ->orWhereBetween('end_date', [$startDateFilter, $endDateFilter])
+                        ->orWhere(function ($q2) use ($startDateFilter, $endDateFilter) {
+                            $q2->where('start_date', '<', $startDateFilter)
+                                ->where('end_date', '>', $endDateFilter);
+                        });
+                });
+            } elseif ($startDateFilter) {
+                $sessionsQuery->where(function ($q) use ($startDateFilter) {
+                    $q->whereDate('start_date', '>=', $startDateFilter)
+                        ->orWhereDate('end_date', '>=', $startDateFilter);
+                });
+            } elseif ($endDateFilter) {
+                $sessionsQuery->where(function ($q) use ($endDateFilter) {
+                    $q->whereDate('start_date', '<=', $endDateFilter)
+                        ->orWhereDate('end_date', '<=', $endDateFilter);
+                });
             }
-        }
 
-        // 3. Build array of parent tasks with their total hours
-        $parentTasksWithHours = [];
-        foreach ($project->tasks->whereNull('parent_task_id') as $parentTask) {
-            
-            $totalHours = $rolledUpHours[$parentTask->id] ?? 0;
-            $parentTasksWithHours[] = [
-                'task_id' => $parentTask->id,
-                'task_title' => $parentTask->task_title,
-                'total_hours' => $totalHours,
-                'total_hours_formatted' => $this->formatHours($totalHours),
-            ];
-        }
+            $allSessions = $sessionsQuery->get();
 
-        // 4. Attach to project response
-        $project->tasks_hours_summary = $parentTasksWithHours;
+            // 2. ONE query: all adjustments for those sessions
+            $allSessionIds        = $allSessions->pluck('id')->toArray();
+            $adjustmentsBySession = !empty($allSessionIds)
+                ? DB::table('session_time_adjustments')
+                    ->whereIn('session_id', $allSessionIds)
+                    ->get()
+                    ->groupBy('session_id')
+                : collect();
 
-        return response()->json($project);
-    }
-    
+            // 3. Group sessions by task_id; compute hours in PHP — zero extra queries
+            $sessionsByTask = $allSessions->groupBy('task_id');
 
-    private function calculateEmployeeTaskHours($employeeId=null, $taskId, $startDateFilter = null, $endDateFilter = null)
-    {
-        
-        $sessionsQuery = WorkSession::where('task_id', $taskId);
+            foreach ($allTaskIds as $taskId) {
+                $sessions     = $sessionsByTask->get($taskId, collect());
+                $totalSeconds = 0;
 
-    
-        // Apply date range if provided
-        if ($startDateFilter && $endDateFilter) {
-            $sessionsQuery->where(function ($q) use ($startDateFilter, $endDateFilter) {
-                $q->whereBetween('start_date', [$startDateFilter, $endDateFilter])
-                  ->orWhereBetween('end_date', [$startDateFilter, $endDateFilter])
-                  ->orWhere(function ($q2) use ($startDateFilter, $endDateFilter) {
-                      $q2->where('start_date', '<', $startDateFilter)
-                         ->where('end_date', '>', $endDateFilter);
-                  });
-            });
-        } elseif ($startDateFilter) {
-            $sessionsQuery->where(function ($q) use ($startDateFilter) {
-                $q->whereDate('start_date', '>=', $startDateFilter)
-                  ->orWhereDate('end_date', '>=', $startDateFilter);
-            });
-        } elseif ($endDateFilter) {
-            $sessionsQuery->where(function ($q) use ($endDateFilter) {
-                $q->whereDate('start_date', '<=', $endDateFilter)
-                  ->orWhereDate('end_date', '<=', $endDateFilter);
-            });
-        }
-    
-        $sessions = $sessionsQuery->get();
-        
-       // \Log::info($sessions);
-    
-        $totalSeconds = 0;
-        $dateWiseTotals = [];
-        $dateWiseAdjustments = [];
-    
-        foreach ($sessions as $session) {
-            try {
-                // Parse start time
-                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
-    
-                // Parse end time (handle running sessions and null end dates)
-                if (is_null($session->end_time)) {
-                    $sessionEnd = now();
-                } else {
-                    $endDate = $session->end_date ?? $session->start_date;
-                    $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
-                }
-                
-                
-                
-                
-    
-                // Calculate session duration
-                $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
-    
-                // Subtract adjustments
-                $adjustmentSeconds = 0;
-                $adjustments = DB::table('session_time_adjustments')
-                    ->where('session_id', $session->id)
-                    ->get();
-    
-                foreach ($adjustments as $adj) {
-                    if (empty($adj->start_time) || empty($adj->end_time)) {
-                        continue;
-                    }
-    
+                foreach ($sessions as $session) {
                     try {
-                        $adjStart = Carbon::parse($adj->start_time);
-                        $adjEnd = Carbon::parse($adj->end_time);
-                        $adjustmentDuration = abs($adjEnd->diffInSeconds($adjStart));
-                        $adjustmentSeconds += $adjustmentDuration;
+                        $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+                        $sessionEnd   = is_null($session->end_time)
+                            ? now()
+                            : Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
+
+                        $sessionDuration   = abs($sessionEnd->diffInSeconds($sessionStart));
+                        $adjustmentSeconds = 0;
+
+                        foreach ($adjustmentsBySession->get($session->id, collect()) as $adj) {
+                            if (empty($adj->start_time) || empty($adj->end_time)) continue;
+                            try {
+                                $adjustmentSeconds += abs(
+                                    Carbon::parse($adj->end_time)->diffInSeconds(Carbon::parse($adj->start_time))
+                                );
+                            } catch (\Exception $e) {
+                                continue;
+                            }
+                        }
+
+                        $netSeconds = $sessionDuration - $adjustmentSeconds;
+                        if ($netSeconds > 0) {
+                            $totalSeconds += $netSeconds;
+                        }
                     } catch (\Exception $e) {
                         continue;
                     }
                 }
-    
-                // Compute net worked time
-                $netSeconds = $sessionDuration - $adjustmentSeconds;
-               //$netSeconds = $sessionDuration;
-               
-               
-               
-               
-    
-                if ($netSeconds > 0) {
-                    $totalSeconds += $netSeconds;
-    
-                    $date = Carbon::parse($session->start_date)->format('Y-m-d');
-    
-                    if (!isset($dateWiseTotals[$date])) {
-                        $dateWiseTotals[$date] = 0;
-                    }
-                    if (!isset($dateWiseAdjustments[$date])) {
-                        $dateWiseAdjustments[$date] = 0;
-                    }
-    
-                    $dateWiseTotals[$date] += $netSeconds;
-                    $dateWiseAdjustments[$date] += $adjustmentSeconds;
-                }
-                
-                
-                if($session->task_id == 433){
-                    
-                       // \Log::info('session start date '.$session->start_date);
-                       // \Log::info('session end date '.$session->end_date);
-                        
-                      //  \Log::info('session start time '.$session->start_time);
-                      //  \Log::info('session end time '.$session->end_time);
-                        
-                       // \Log::info('session duration '.$sessionDuration);
-                      //  \Log::info('idle duration '.$adjustmentSeconds);
-                        
-                       // \Log::info('netSeconds '.$netSeconds);
-                        
-                     //    \Log::info('total seconds '.$totalSeconds);
-                    
-                }
-    
-            } catch (\Exception $e) {
-                continue;
+
+                $taskHours[$taskId] = $totalSeconds;
+            }
+        } else {
+            foreach ($project->allTasks as $task) {
+                $taskHours[$task->id] = 0;
             }
         }
-    
-        // ✅ Log date-wise totals and adjustments
-        foreach ($dateWiseTotals as $date => $seconds) {
-            $hours = round($seconds / 3600, 2);
-            $adjustHrs = isset($dateWiseAdjustments[$date]) ? round($dateWiseAdjustments[$date] / 3600, 2) : 0;
-            $totalWithAdj = round(($seconds + $dateWiseAdjustments[$date]) / 3600, 2);
-    
-           // \Log::info("[$date] Employee $employeeId - Task $taskId: Worked {$hours} hrs | Adjusted {$adjustHrs} hrs | Original {$totalWithAdj} hrs");
+
+        // Roll up child task hours into their parent
+        $rolledUpHours = [];
+        foreach ($project->allTasks as $task) {
+            $hours = $taskHours[$task->id] ?? 0;
+            if ($task->parent_task_id) {
+                $rolledUpHours[$task->parent_task_id] = ($rolledUpHours[$task->parent_task_id] ?? 0) + $hours;
+            } else {
+                $rolledUpHours[$task->id] = ($rolledUpHours[$task->id] ?? 0) + $hours;
+            }
         }
-        
-     
-        
-    
-        return $totalSeconds;
+
+        $parentTasksWithHours = [];
+        foreach ($project->tasks->whereNull('parent_task_id') as $parentTask) {
+            $totalHours             = $rolledUpHours[$parentTask->id] ?? 0;
+            $parentTasksWithHours[] = [
+                'task_id'               => $parentTask->id,
+                'task_title'            => $parentTask->task_title,
+                'total_hours'           => $totalHours,
+                'total_hours_formatted' => $this->formatHours($totalHours),
+            ];
+        }
+
+        $project->tasks_hours_summary = $parentTasksWithHours;
+
+        return response()->json($project);
     }
-
-
-    
 
     // Helper method to format seconds into hours and minutes
     private function formatHours($seconds)
@@ -609,57 +562,88 @@ class ProjectController extends Controller
             ? Carbon::parse($request->input('date'))->startOfDay()
             : Carbon::today();
 
-        $page    = $request->input('page', 1);
+        $page    = max(1, (int) $request->input('page', 1));
         $perPage = 10;
 
-        // --- Base query: tasks whose date range covers the target date ---
-        $mainTasks = ProjectTask::with([
-            'project',
-            'assignees:id,employee_id,task_id',
-            'assignees.user:id,name,profile_pic',
-            'creator:id,name,profile_pic',
-            'attachments',
-            'subTasks',
-            'subTasks.assignees:id,employee_id,task_id',
-            'subTasks.assignees.user:id,name,profile_pic',
-            'subTasks.creator:id,name,profile_pic',
-            'subTasks.attachments',
-        ])
+        // --- Base parent-task query (filters only, no heavy relations yet) ---
+        $baseParentQuery = ProjectTask::query()
             ->whereNull('parent_task_id')
             ->whereDate('due_date', $targetDate)
-            ->whereNull('completed_date')
-            ->get();
+            ->whereNull('completed_date');
 
-        // --- Expand tasks + subtasks into flat rows ---
-        $rows = [];
-        foreach ($mainTasks as $task) {
-            if ($task->subTasks->isNotEmpty()) {
-                foreach ($task->subTasks as $sub) {
-                    $rows[] = [
-                        'project'  => $task->project,
-                        'task'     => $task,
-                        'sub_task' => $sub,
-                    ];
+        // Phase 1: cheap skeleton — parent ids + project ids, and subtask ids
+        $parentSkeleton = (clone $baseParentQuery)->orderBy('id')->get(['id', 'project_id']);
+        $parentIds = $parentSkeleton->pluck('id');
+
+        $subSkeleton = $parentIds->isEmpty()
+            ? collect()
+            : ProjectTask::whereIn('parent_task_id', $parentIds)
+                ->orderBy('id')
+                ->get(['id', 'parent_task_id'])
+                ->groupBy('parent_task_id');
+
+        // Build flat-row skeleton (same expansion order as before)
+        $flat = [];
+        foreach ($parentIds as $pid) {
+            $subs = $subSkeleton->get($pid);
+            if ($subs && $subs->isNotEmpty()) {
+                foreach ($subs as $s) {
+                    $flat[] = ['task_id' => $pid, 'sub_id' => $s->id];
                 }
             } else {
-                $rows[] = [
-                    'project'  => $task->project,
-                    'task'     => $task,
-                    'sub_task' => null,
-                ];
+                $flat[] = ['task_id' => $pid, 'sub_id' => null];
             }
         }
 
-        // --- Paginate the flat rows ---
-        $total     = count($rows);
+        $total     = count($flat);
         $offset    = ($page - 1) * $perPage;
-        $paginated = array_slice($rows, $offset, $perPage);
+        $pageRows  = array_slice($flat, $offset, $perPage);
 
-        // --- Summary counts for the date (before pagination) ---
-        $uniqueTaskIds    = collect($rows)->pluck('task.id')->unique()->count();
-        $uniqueSubIds     = collect($rows)->filter(fn($r) => $r['sub_task'] !== null)
-                                ->pluck('sub_task.id')->unique()->count();
-        $uniqueProjectIds = collect($rows)->pluck('project.id')->unique()->count();
+        // --- Summary counts for the date (from the cheap skeleton, before pagination) ---
+        $totalSubIds = 0;
+        foreach ($subSkeleton as $group) {
+            $totalSubIds += $group->count();
+        }
+        $uniqueTaskIds    = $parentIds->count();
+        $uniqueSubIds     = $totalSubIds;
+        $uniqueProjectIds = $parentSkeleton->pluck('project_id')->unique()->count();
+
+        // Phase 2: heavy-load ONLY the parent tasks needed for this page
+        $neededParentIds = array_values(array_unique(array_map(fn($r) => $r['task_id'], $pageRows)));
+
+        $parents = collect();
+        if (!empty($neededParentIds)) {
+            $parents = ProjectTask::with([
+                'project',
+                'assignees:id,employee_id,task_id',
+                'assignees.user:id,name,profile_pic',
+                'creator:id,name,profile_pic',
+                'attachments',
+                'subTasks',
+                'subTasks.assignees:id,employee_id,task_id',
+                'subTasks.assignees.user:id,name,profile_pic',
+                'subTasks.creator:id,name,profile_pic',
+                'subTasks.attachments',
+            ])->whereIn('id', $neededParentIds)->get()->keyBy('id');
+        }
+
+        // Rebuild rows in exact page order — same shape as before
+        $paginated = [];
+        foreach ($pageRows as $row) {
+            $task = $parents->get($row['task_id']);
+            if (!$task) {
+                continue;
+            }
+            $sub = $row['sub_id'] !== null
+                ? $task->subTasks->firstWhere('id', $row['sub_id'])
+                : null;
+
+            $paginated[] = [
+                'project'  => $task->project,
+                'task'     => $task,
+                'sub_task' => $sub,
+            ];
+        }
 
         return response()->json([
             'date'         => $targetDate->toDateString(),

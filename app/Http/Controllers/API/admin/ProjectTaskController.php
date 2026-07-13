@@ -25,7 +25,7 @@ class ProjectTaskController extends Controller
     // ✅ Get all tasks (optionally filtered by project)
     public function index(Request $request)
     {
-        $query = ProjectTask::with(['assignees', 'assignees.user', 'comments', 'creator', 'attachments']);
+        $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments']);
 
         if ($request->has('project_id')) {
             $query->where('project_id', $request->project_id);
@@ -38,7 +38,7 @@ class ProjectTaskController extends Controller
 
     public function allTasks()
     {
-        $query = ProjectTask::with(['assignees', 'assignees.user', 'comments', 'creator', 'attachments', 'parentTask'])->get();
+        $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments', 'parentTask'])->get();
 
         //$tasks = $query->whereNull('parent_task_id')->get();
 
@@ -56,6 +56,8 @@ class ProjectTaskController extends Controller
             'due_date' => 'nullable|date',
             'parent_task_id' => 'nullable|exists:project_tasks,id',
             'attachments.*' => 'nullable|file|max:10240', // each file max 10MB
+            'employee_ids' => 'nullable|array',
+            'employee_ids.*' => 'exists:users,id',
         ]);
 
         // Create the task
@@ -110,6 +112,15 @@ class ProjectTaskController extends Controller
             }
         }
 
+        // Assign the assignees explicitly selected in the form (parent tasks AND subtasks)
+        $selectedEmployeeIds = $request->employee_ids ?? [];
+        foreach ($selectedEmployeeIds as $employeeId) {
+            TaskAssignee::firstOrCreate([
+                'task_id' => $task->id,
+                'employee_id' => $employeeId,
+            ]);
+        }
+
         // Automatically assign task to all users already assigned to the project
         if ($request->parent_task_id == null || $request->parent_task_id == "") {
             $projectAssignees = ProjectAssignee::where('project_id', $request->project_id)->pluck('employee_id');
@@ -135,132 +146,77 @@ class ProjectTaskController extends Controller
         $task = ProjectTask::with([
             'assignees',
             'assignees.user',
-            'comments',
-            'comments.sender',
-            'comments.commentAttachments',
             'subTasks',
             'subTasks.creator',
+            'subTasks.assignees',
+            'subTasks.assignees.user',
             'attachments',
             'allBriefs',
             'allBriefs.attachments',
             'allNotes'
         ])->findOrFail($id);
 
-        // Calculate working hours for each assignee
+        // 1. ONE query: all sessions for this task (across all employees)
+        $allSessions = WorkSession::where('task_id', $task->id)->get();
+
+        // 2. ONE query: all adjustments for those sessions
+        $allSessionIds = $allSessions->pluck('id')->toArray();
+        $adjustmentsBySession = !empty($allSessionIds)
+            ? DB::table('session_time_adjustments')
+                ->whereIn('session_id', $allSessionIds)
+                ->get()
+                ->groupBy('session_id')
+            : collect();
+
+        // 3. Group sessions by employee; compute per-employee in PHP — zero extra queries
+        $sessionsByEmployee = $allSessions->groupBy('user_id');
+
         $assigneesWithHours = [];
-
         foreach ($task->assignees as $assignee) {
-            $employeeId = $assignee->employee_id;
+            $sessions     = $sessionsByEmployee->get($assignee->employee_id, collect());
+            $totalSeconds = 0;
 
-            // Calculate total working hours for this employee on this task
-            $totalHours = $this->calculateEmployeeTaskHours($employeeId, $task->id);
+            foreach ($sessions as $session) {
+                try {
+                    $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+                    $sessionEnd   = is_null($session->end_time)
+                        ? now()
+                        : Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
+
+                    $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
+                    $adjustmentSeconds = 0;
+
+                    foreach ($adjustmentsBySession->get($session->id, collect()) as $adj) {
+                        if (empty($adj->start_time) || empty($adj->end_time)) continue;
+                        try {
+                            $adjustmentSeconds += abs(
+                                Carbon::parse($adj->end_time)->diffInSeconds(Carbon::parse($adj->start_time))
+                            );
+                        } catch (\Exception $e) {
+                            continue;
+                        }
+                    }
+
+                    $netSeconds = $sessionDuration - $adjustmentSeconds;
+                    if ($netSeconds > 0) {
+                        $totalSeconds += $netSeconds;
+                    }
+                } catch (\Exception $e) {
+                    continue;
+                }
+            }
 
             $assigneesWithHours[] = [
-                'assignee' => $assignee,
-                'user' => $assignee->user,
-                'total_working_hours' => $totalHours,
-                'total_working_hours_formatted' => $this->formatHours($totalHours)
+                'assignee'                      => $assignee,
+                'user'                          => $assignee->user,
+                'total_working_hours'           => $totalSeconds,
+                'total_working_hours_formatted' => $this->formatHours($totalSeconds),
             ];
         }
 
-        // Add the calculated hours to the task response
         $task->assignees_with_hours = $assigneesWithHours;
 
         return response()->json($task);
-    }
-
-    // Helper method to calculate employee task hours
-    private function calculateEmployeeTaskHours($employeeId, $taskId)
-    {
-        \Log::info("Calculating hours for employee: $employeeId, task: $taskId");
-
-        $sessions = WorkSession::where('user_id', $employeeId)
-            ->where('task_id', $taskId)
-            ->get();
-
-        \Log::info("Found " . $sessions->count() . " work sessions");
-
-        $totalSeconds = 0;
-
-        foreach ($sessions as $session) {
-           
-
-            try {
-                // Parse start time
-                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
-
-                // Parse end time (handle running sessions and null end dates)
-                if (is_null($session->end_time)) {
-                    $sessionEnd = now();
-                    
-                } else {
-                    $endDate = $session->end_date ?? $session->start_date;
-                    $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
-                }
-
-              
-
-                // Calculate duration - ensure it's positive
-                $sessionDuration = $sessionEnd->diffInSeconds($sessionStart);
-                
-
-                // If duration is negative, swap the times (this handles cases where end time is before start time)
-                if ($sessionDuration < 0) {
-                   
-                    $sessionDuration = $sessionStart->diffInSeconds($sessionEnd);
-                    
-                }
-
-                // Subtract adjustments
-                $adjustmentSeconds = 0;
-                $adjustments = DB::table('session_time_adjustments')
-                    ->where('session_id', $session->id)
-                    ->get();
-
-               
-
-                foreach ($adjustments as $adj) {
-                    if (empty($adj->start_time) || empty($adj->end_time)) {
-                        
-                        continue;
-                    }
-
-                    try {
-                        $adjStart = Carbon::parse($adj->start_time);
-                        $adjEnd = Carbon::parse($adj->end_time);
-                        $adjustmentDuration = $adjEnd->diffInSeconds($adjStart);
-
-                        // Ensure adjustment duration is positive
-                        if ($adjustmentDuration < 0) {
-                            $adjustmentDuration = $adjStart->diffInSeconds($adjEnd);
-                        }
-
-                        $adjustmentSeconds += $adjustmentDuration;
-                      
-                    } catch (\Exception $e) {
-                        \Log::error("Error parsing adjustment times: " . $e->getMessage());
-                        continue;
-                    }
-                }
-
-                $netSeconds = $sessionDuration - $adjustmentSeconds;
-               
-
-                if ($netSeconds > 0) {
-                    $totalSeconds += $netSeconds;
-                    
-                } else {
-                   
-                }
-
-            } catch (\Exception $e) {
-                \Log::error("Error processing session {$session->id}: " . $e->getMessage());
-                continue;
-            }
-        }
-
-
-        return $totalSeconds;
     }
 
     // Helper method to format seconds into hours and minutes

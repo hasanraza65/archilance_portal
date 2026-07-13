@@ -35,10 +35,12 @@ class User extends Authenticatable
         'remember_token',
     ];
 
-    protected $appends = [
-        'today_time',
-        'week_time'
-    ];
+    // NOTE: today_time / week_time are intentionally NOT globally appended.
+    // Each accessor runs work_session queries, so appending them on every User
+    // serialization (projects, tasks, members, calendar, chat, comments, …)
+    // caused a heavy N+1. They are appended explicitly only where needed
+    // (the employee tracking list — UserManagementController@index for role 3).
+    protected $appends = [];
 
     /**
      * Get the attributes that should be cast.

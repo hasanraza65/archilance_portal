@@ -88,6 +88,7 @@ class ProjectTaskController extends Controller
     // ✅ Store new task
     public function store(Request $request)
     {
+        //return response()->json($request->all());
         $request->validate([
             'project_id' => 'required|exists:projects,id',
             'task_title' => 'required|string|max:255',
@@ -95,7 +96,11 @@ class ProjectTaskController extends Controller
             'priority' => 'nullable|string',
             'due_date' => 'nullable|date',
             'parent_task_id' => 'nullable|exists:project_tasks,id',
-            'attachments.*' => 'nullable|file|max:10240', // each file max 10MB
+            'attachments.*' => 'nullable|file|max:10240',
+
+            // New
+            'employee_ids' => 'nullable|array',
+            'employee_ids.*' => 'exists:users,id',
         ]);
 
         $task = ProjectTask::create([
@@ -129,10 +134,20 @@ class ProjectTaskController extends Controller
         }
 
         // ✅ Auto-assign the creator to the task
-        TaskAssignee::create([
-            'task_id' => $task->id,
-            'employee_id' => auth()->id(),
-        ]);
+        $employeeIds = $request->employee_ids ?? [];
+
+        // Always assign the creator as well
+        $employeeIds[] = auth()->id();
+
+        // Remove duplicate IDs
+        $employeeIds = array_unique($employeeIds);
+
+        foreach ($employeeIds as $employeeId) {
+            TaskAssignee::create([
+                'task_id' => $task->id,
+                'employee_id' => $employeeId,
+            ]);
+        }
 
         if ($request->hasFile('attachments')) {
             foreach ($request->file('attachments') as $file) {
@@ -200,6 +215,8 @@ class ProjectTaskController extends Controller
         'assignees.user',
         'subTasks',
         'subTasks.creator',
+        'subTasks.assignees',
+        'subTasks.assignees.user',
         'attachments',
         'allBriefs',
         'allBriefs.attachments',
