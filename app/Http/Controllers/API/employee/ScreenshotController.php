@@ -32,35 +32,35 @@ class ScreenshotController extends Controller
 
         //\Log::info('screenshot time '.Carbon::now());
 
-        // 1. Check if a session exists for today with null end_time
-        $currentSession = WorkSession::where('user_id', $userId)
-      
-            ->whereNull('end_time')
-            ->latest('start_time')
-            ->latest('start_time')
-            ->first();
+        // Attach the screenshot to the EXACT work session the desktop app is tracking.
+        //
+        // Previously this endpoint IGNORED the work_session_id the app sends: it picked the
+        // user's "latest open" session and, if none was open, CLOSED all open sessions and
+        // CREATED a brand-new one. That mis-attributed screenshots to the wrong session and
+        // spawned duplicate/overlapping sessions. It now ONLY attaches; it never creates,
+        // closes, or reopens sessions (start/stop are the single source of truth for that).
+        $currentSession = null;
 
-        // 2. If no session found, handle older open sessions + create new one
-        if (!$currentSession) {
-            // 2a. Close any previous open sessions
-            $previousOpenSessions = WorkSession::whereNull('end_time')
-                ->where('user_id', $userId)
-                ->get();
-
-            foreach ($previousOpenSessions as $session) {
-                $session->end_time = Carbon::now();
-                $session->save();
-            }
-
-            // 2b. Create a new session
-            $currentSession = new WorkSession();
-            $currentSession->user_id = $userId;
-            $currentSession->task_id = $request->task_id ?? null;
-            $currentSession->memo_content = $request->memo_content ?? null;
-            $currentSession->start_time = Carbon::now();
-            $currentSession->save();
+        if ($request->filled('work_session_id')) {
+            $currentSession = WorkSession::where('user_id', $userId)
+                ->where('id', $request->work_session_id)
+                ->first();
         }
 
+        // Backward-compatible fallback for older clients that don't send work_session_id:
+        // use the latest still-open session. We never create/close sessions here.
+        if (!$currentSession) {
+            $currentSession = WorkSession::where('user_id', $userId)
+                ->whereNull('end_time')
+                ->latest('start_time')
+                ->first();
+        }
+
+        if (!$currentSession) {
+            return response()->json([
+                'message' => 'No matching work session found for this screenshot.'
+            ], 422);
+        }
         // 🔹 3. If screenshot comes in, end any active idle time for this session
         $openIdle = SessionTimeAdjustment::where('session_id', $currentSession->id)
             ->whereNull('end_time')

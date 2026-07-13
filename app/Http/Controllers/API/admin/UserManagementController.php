@@ -59,6 +59,10 @@ class UserManagementController extends Controller
                     }
 
                     unset($user->workSessions); // clean response
+
+                    // today_time / week_time are only needed on the employee tracking list.
+                    // Appended here (not globally) to avoid work_session N+1 everywhere else.
+                    $user->append(['today_time', 'week_time']);
                 }
 
                 return $user;

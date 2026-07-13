@@ -261,12 +261,42 @@ class WorkSessionController extends Controller
         }
 
         // 4. Start a new session
+        //
+        // Offline-safe start time: the desktop app may have started this session while OFFLINE
+        // and is only syncing it now. Honour the real start timestamp it sends so we record
+        // when work actually began — not when the sync happened. If the app sends nothing
+        // (older versions) or an unparseable value, we fall back to $now so a start is never
+        // blocked and the system never crashes. (Mirrors how stop() already trusts end_time.)
+        // Default: server "now" (already carries this user's clock offset from the top of store()).
+        $startDateTime = $now;
+
+        if ($request->filled('start_time')) {
+            try {
+                $parsedStart = Carbon::parse($request->start_time);
+
+                // Preserve the existing per-user clock adjustment so specially-handled users
+                // keep the exact same recorded times they had before (this only fixes WHEN the
+                // start was, it does not change their offset behaviour).
+                if ($userId == 173 || $userId == 146) {
+                    $parsedStart = $parsedStart->subHours(2);
+                } elseif ($userId == 182) {
+                    $parsedStart = $parsedStart->addHours(2);
+                }
+
+                $startDateTime = $parsedStart;
+            } catch (\Throwable $e) {
+                // Unparseable timestamp from the client → safe fallback, never crash.
+                $startDateTime = $now;
+            }
+        }
+
         $newSession = new WorkSession();
         $newSession->user_id = $userId;
         $newSession->task_id = $request->task_id;
         $newSession->memo_content = $request->memo_content;
-        $newSession->start_time = $now;
-        $newSession->start_date = $now->toDateString();
+        $newSession->start_time = $startDateTime;
+        // Derive start_date from the same instant so date + time can never disagree.
+        $newSession->start_date = $startDateTime->toDateString();
         $newSession->save();
 
         return response()->json([
@@ -449,13 +479,13 @@ class WorkSessionController extends Controller
                 'last_heartbeat' => $now,
                 'last_heartbeat_type' => $request->type ?? 'Active',
             ];
-    
-            // Reactivate session if it was ended
-            if (!is_null($session->end_date) || !is_null($session->end_time)) {
-                $updateData['end_date'] = null;
-                $updateData['end_time'] = null;
-            }
-    
+
+            // NOTE: We intentionally do NOT reactivate an ended session here.
+            // Re-opening a session that was already closed (by an explicit stop or by the
+            // CheckHeartBeat safety-net) caused it to ping-pong open/closed and overlap with
+            // newer sessions, corrupting the timeline. A closed session stays closed; the
+            // heartbeat only records liveness via last_heartbeat.
+
             $session->update($updateData);
     
             // =====================================================

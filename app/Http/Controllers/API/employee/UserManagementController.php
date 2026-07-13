@@ -54,6 +54,11 @@ class UserManagementController extends Controller
                 ->get();
         }
 
+        // today_time / week_time are only needed on the employee tracking list.
+        // Appended here (not globally) to avoid work_session N+1 everywhere else.
+        if ($roleId === 3) {
+            $users->each->append(['today_time', 'week_time']);
+        }
 
         return response()->json($users);
     }
