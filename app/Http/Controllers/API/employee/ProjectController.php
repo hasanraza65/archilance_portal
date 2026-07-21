@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\employee;
 
 use App\Http\Controllers\Controller;
+use App\Traits\AnnotatesTaskUrgency;
 use Illuminate\Http\Request;
 use App\Models\Project;
 use App\Models\ProjectTask;
@@ -15,6 +16,8 @@ use App\Models\User;
 
 class ProjectController extends Controller
 {
+    use AnnotatesTaskUrgency;
+
     public function index(Request $request)
     {
         $user = Auth::user();
@@ -50,7 +53,7 @@ class ProjectController extends Controller
             && !$request->boolean('assigned_me')
         ) {
             $projects = Project::latest()
-                ->with($withRelations)
+                ->with($withRelations)->withCount(['tasks', 'allTasks as urgent_count' => function ($q) { $q->where('priority', 'Urgent'); }])
                 ->when($request->customer_id, function ($query) use ($request) {
                     $query->where('customer_id', $request->customer_id);
                 })
@@ -71,7 +74,7 @@ class ProjectController extends Controller
             $all_project_ids = $linkedProjectIds->merge($taskProjectIds)->unique()->values()->toArray();
 
             $projects = Project::latest()
-                ->with($withRelations)
+                ->with($withRelations)->withCount(['tasks', 'allTasks as urgent_count' => function ($q) { $q->where('priority', 'Urgent'); }])
                 ->whereIn('id', $all_project_ids)
                 ->when($request->customer_id, function ($query) use ($request) {
                     $query->where('customer_id', $request->customer_id);
@@ -124,7 +127,7 @@ class ProjectController extends Controller
         $all_project_ids = $linkedProjectIds->merge($taskProjectIds)->unique()->values()->toArray();
 
         $projects = Project::latest()
-                ->with($withRelations)
+                ->with($withRelations)->withCount(['tasks', 'allTasks as urgent_count' => function ($q) { $q->where('priority', 'Urgent'); }])
                 ->whereIn('id', $all_project_ids)
                 ->when($request->customer_id, function ($query) use ($request) {
                     $query->where('customer_id', $request->customer_id);
@@ -457,6 +460,7 @@ class ProjectController extends Controller
                 $message = $from_user->name . " has assigned you a job " . $project_detail->project_name;
 
                 insertNotificationWithNature($user->id, \Auth::user()->id, "project_assigned", $message, $nature, $projectId);
+                sendAssignmentEmail($user, \Auth::user(), "project_assigned", $projectId);
             }
 
         }
@@ -483,7 +487,7 @@ class ProjectController extends Controller
             'projectAssignees.user',
             'customer',
             'allTasks',
-            'tasks',
+            'tasks' => function ($q) { $q->withCount('subTasks'); },
             'tasks.creator',
             'tasks.assignees',
             'tasks.assignees.user',
@@ -492,6 +496,9 @@ class ProjectController extends Controller
             'allBriefs.attachments',
             'allNotes'
         ])->findOrFail($id);
+
+        // Flag parent tasks that have an Urgent task nested inside them.
+        $this->annotateUrgency($project->tasks, $this->urgentAncestorSet($project->id));
 
         $startDateFilter = $request->summary_start_date ?? null;
         $endDateFilter   = $request->summary_end_date   ?? null;

@@ -12,3 +12,6 @@ Artisan::command('inspire', function () {
 Schedule::call(function () {
     app(\App\Console\Commands\CheckHeartBeat::class)->handle();
 })->everyMinute();
+
+// Daily digest of tasks with an approaching / overdue due date (each morning at 8am).
+Schedule::command('notify:due-reminders')->dailyAt('08:00');

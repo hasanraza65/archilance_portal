@@ -14,10 +14,13 @@ use App\Models\TrackWindow;
 use App\Models\WorkingHour;
 use App\Models\ActivityLog;
 use Illuminate\Support\Facades\Validator;
+use App\Traits\ResolvesClientTime;
 
 
 class WorkSessionController extends Controller
 {
+    use ResolvesClientTime;
+
 
     public function index(Request $request)
     {
@@ -93,24 +96,49 @@ class WorkSessionController extends Controller
                     $workEnd = min($sessionEnd, $dayEnd);
 
                     if ($workStart->lt($workEnd)) {
-                        $sessionDuration += $workEnd->diffInSeconds($workStart);
+                        // abs()+int: Carbon 3's diffInSeconds is signed, so later->earlier is
+                        // NEGATIVE. Force a positive integer (matching the adjustment term and
+                        // User::calculateWorkedTime) — otherwise every completed session, whose
+                        // net is then clamped by max(0,...), would display as 0h 0m.
+                        $sessionDuration += (int) abs($workEnd->diffInSeconds($workStart));
                     }
                 }
 
-                // Calculate adjustments for the filtered period
+                // Calculate adjustments for the filtered period.
                 $adjustmentSeconds = 0;
                 $adjustments = DB::table('session_time_adjustments')
                     ->where('session_id', $session->id)
                     ->get();
 
+                // MERGE overlapping idle intervals FIRST. Two idle records can legitimately
+                // overlap (e.g. a real-time idle that overlaps a sleep-gap idle); summing each
+                // one independently would double-subtract the overlap and drive worked time
+                // negative. Union them so each real second of idle is counted exactly once.
+                $intervals = [];
                 foreach ($adjustments as $adj) {
                     if (empty($adj->start_time) || empty($adj->end_time)) {
                         continue;
                     }
+                    $s = Carbon::parse($adj->start_time);
+                    $e = Carbon::parse($adj->end_time);
+                    if ($e->lte($s)) {
+                        continue;
+                    }
+                    $intervals[] = [$s, $e];
+                }
+                usort($intervals, fn($a, $b) => $a[0]->getTimestamp() <=> $b[0]->getTimestamp());
 
-                    $adjStart = Carbon::parse($adj->start_time);
-                    $adjEnd = Carbon::parse($adj->end_time);
+                $merged = [];
+                foreach ($intervals as $iv) {
+                    $n = count($merged);
+                    if ($n === 0 || $iv[0]->gt($merged[$n - 1][1])) {
+                        $merged[] = $iv;
+                    } elseif ($iv[1]->gt($merged[$n - 1][1])) {
+                        $merged[$n - 1][1] = $iv[1];
+                    }
+                }
 
+                foreach ($merged as [$adjStart, $adjEnd]) {
                     // Calculate adjustments day by day to respect midnight boundaries
                     foreach ($filterDates as $date) {
                         $dayStart = Carbon::parse($date)->startOfDay();
@@ -120,16 +148,21 @@ class WorkSessionController extends Controller
                         $adjEndFiltered = min($adjEnd, $dayEnd);
 
                         if ($adjStartFiltered->lt($adjEndFiltered)) {
-                            $adjustmentSeconds += $adjEndFiltered->diffInSeconds($adjStartFiltered);
+                            // abs()+int: Carbon 3's diffInSeconds is signed/float; force a
+                            // non-negative integer so accumulation and the later % are correct.
+                            $adjustmentSeconds += (int) abs($adjEndFiltered->diffInSeconds($adjStartFiltered));
                         }
                     }
                 }
 
-                $netSeconds = $sessionDuration - $adjustmentSeconds;
+                // Clamp at 0 and force integer — worked time can never be negative, and the
+                // hours/minutes math below relies on an int (% 3600). (Previously used abs(),
+                // which turned a double-subtract error into a bogus POSITIVE total.)
+                $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
 
                 if ($session->total_time !== 'Running') {
-                    $hours = floor(abs($netSeconds) / 3600);
-                    $minutes = floor((abs($netSeconds) % 3600) / 60);
+                    $hours = floor($netSeconds / 3600);
+                    $minutes = floor(($netSeconds % 3600) / 60);
                     $session->total_time = sprintf('%dh %dm', $hours, $minutes);
                     $time_strings_hr[] = $session->total_time;
                 }
@@ -198,30 +231,52 @@ class WorkSessionController extends Controller
     }
 
    public function store(Request $request)
-{
-    $userId = Auth::id();
-    
-    $my_working_hours = WorkingHour::where('employee_id', $userId)->get();
-    
-    if ($userId == 173 || $userId == 146) {
-        $now = Carbon::now()->subHours(2);
-    }elseif($userId == 182){
-        $now = Carbon::now()->addHours(2);
-    } 
-    else {
-        $now = Carbon::now();
-    }
-    
+    {
+        $userId = Auth::id();
 
-        // 1. Check if current time falls within any of the user's working hours
+        $my_working_hours = WorkingHour::where('employee_id', $userId)->get();
+
+        // Legacy per-user clock offset — used ONLY as a fallback when the client does not
+        // send an absolute UTC timestamp (older app builds).
+        if ($userId == 173 || $userId == 146) {
+            $now = Carbon::now()->subHours(2);
+        } elseif ($userId == 182) {
+            $now = Carbon::now()->addHours(2);
+        } else {
+            $now = Carbon::now();
+        }
+
+        // Resolve the REAL start instant:
+        //  - Prefer start_utc (absolute → correct across timezones AND offline delay); no hack.
+        //  - Else legacy local start_time (+ per-user hack) for older clients.
+        //  - Else server now().
+        if ($this->hasClientUtc($request->input('start_utc'))) {
+            $startDateTime = $this->resolveClientUtc($request->input('start_utc'), $now);
+        } elseif ($request->filled('start_time')) {
+            try {
+                $legacyStart = Carbon::parse($request->start_time);
+                if ($userId == 173 || $userId == 146) {
+                    $legacyStart = $legacyStart->subHours(2);
+                } elseif ($userId == 182) {
+                    $legacyStart = $legacyStart->addHours(2);
+                }
+                $startDateTime = $legacyStart;
+            } catch (\Throwable $e) {
+                $startDateTime = $now->copy();
+            }
+        } else {
+            $startDateTime = $now->copy();
+        }
+
+        // 1. Working-hours restriction — checked against the ACTUAL start instant so a session
+        //    started within hours (but synced later while offline) is not wrongly rejected.
         if ($my_working_hours->count() > 0) {
             $withinWorkingHours = false;
+            $checkTime = Carbon::parse($startDateTime->format('H:i:s'));
             foreach ($my_working_hours as $slot) {
-                $start = Carbon::parse($slot->start_time);
-                $end = Carbon::parse($slot->end_time);
-
-                // Check if current time is within this slot
-                if ($now->between($start, $end)) {
+                $slotStart = Carbon::parse($slot->start_time);
+                $slotEnd = Carbon::parse($slot->end_time);
+                if ($checkTime->between($slotStart, $slotEnd)) {
                     $withinWorkingHours = true;
                     break;
                 }
@@ -234,70 +289,45 @@ class WorkSessionController extends Controller
                 ], 404);
             }
         }
-        // If no working hours defined, allow starting anytime
+        // If no working hours defined, allow starting anytime.
 
-        // 2. Check if any open session exists for this user
-        $openSession = WorkSession::where('user_id', $userId)
-            ->whereNull('end_time')
-            ->latest('start_time')
-            ->first();
-
-        // 3. Close the previous open session (if exists)
-        if ($openSession) {
-            $lastScreenshot = Screenshot::where('session_id', $openSession->id)
-                ->latest('created_at')
+        // 2-4. Close any open session and create the new one ATOMICALLY, so two concurrent
+        //      starts (or a start racing another request) can never leave two open sessions.
+        $newSession = DB::transaction(function () use ($userId, $request, $startDateTime) {
+            $openSession = WorkSession::where('user_id', $userId)
+                ->whereNull('end_time')
+                ->lockForUpdate()
+                ->latest('start_time')
                 ->first();
 
-            if ($lastScreenshot) {
-                $adjustedTime = Carbon::parse($lastScreenshot->created_at);
-                $openSession->end_time = $adjustedTime;
-                $openSession->end_date = $adjustedTime->toDateString();
-            } else {
-                $openSession->end_time = Carbon::now();
-                $openSession->end_date = Carbon::now()->toDateString();
-            }
+            if ($openSession) {
+                $lastScreenshot = Screenshot::where('session_id', $openSession->id)
+                    ->latest('created_at')
+                    ->first();
 
-            $openSession->save();
-        }
-
-        // 4. Start a new session
-        //
-        // Offline-safe start time: the desktop app may have started this session while OFFLINE
-        // and is only syncing it now. Honour the real start timestamp it sends so we record
-        // when work actually began — not when the sync happened. If the app sends nothing
-        // (older versions) or an unparseable value, we fall back to $now so a start is never
-        // blocked and the system never crashes. (Mirrors how stop() already trusts end_time.)
-        // Default: server "now" (already carries this user's clock offset from the top of store()).
-        $startDateTime = $now;
-
-        if ($request->filled('start_time')) {
-            try {
-                $parsedStart = Carbon::parse($request->start_time);
-
-                // Preserve the existing per-user clock adjustment so specially-handled users
-                // keep the exact same recorded times they had before (this only fixes WHEN the
-                // start was, it does not change their offset behaviour).
-                if ($userId == 173 || $userId == 146) {
-                    $parsedStart = $parsedStart->subHours(2);
-                } elseif ($userId == 182) {
-                    $parsedStart = $parsedStart->addHours(2);
+                if ($lastScreenshot) {
+                    $adjustedTime = Carbon::parse($lastScreenshot->created_at);
+                    $openSession->end_time = $adjustedTime;
+                    $openSession->end_date = $adjustedTime->toDateString();
+                } else {
+                    $openSession->end_time = Carbon::now();
+                    $openSession->end_date = Carbon::now()->toDateString();
                 }
 
-                $startDateTime = $parsedStart;
-            } catch (\Throwable $e) {
-                // Unparseable timestamp from the client → safe fallback, never crash.
-                $startDateTime = $now;
+                $openSession->save();
             }
-        }
 
-        $newSession = new WorkSession();
-        $newSession->user_id = $userId;
-        $newSession->task_id = $request->task_id;
-        $newSession->memo_content = $request->memo_content;
-        $newSession->start_time = $startDateTime;
-        // Derive start_date from the same instant so date + time can never disagree.
-        $newSession->start_date = $startDateTime->toDateString();
-        $newSession->save();
+            $session = new WorkSession();
+            $session->user_id = $userId;
+            $session->task_id = $request->task_id;
+            $session->memo_content = $request->memo_content;
+            $session->start_time = $startDateTime;
+            // Derive start_date from the same instant so date + time can never disagree.
+            $session->start_date = $startDateTime->toDateString();
+            $session->save();
+
+            return $session;
+        });
 
         return response()->json([
             'message' => 'Work session started successfully. Previous session closed if it was open.',
@@ -344,15 +374,23 @@ class WorkSessionController extends Controller
             }
         }
 
-        // Determine end time
+        // Determine end time.
+        //  - Prefer end_utc (absolute → correct across timezones AND offline delay).
+        //  - Else legacy local end_time / end_date for older clients.
+        //  - Else server now().
         $now = Carbon::now();
-        $sessionEndTime = $request->filled('end_time')
-            ? Carbon::parse($request->end_time)
-            : $now;
+        if ($this->hasClientUtc($request->input('end_utc'))) {
+            $sessionEndTime = $this->resolveClientUtc($request->input('end_utc'), $now);
+            $sessionEndDate = $sessionEndTime->toDateString();
+        } else {
+            $sessionEndTime = $request->filled('end_time')
+                ? Carbon::parse($request->end_time)
+                : $now;
 
-        $sessionEndDate = $request->filled('end_date')
-            ? Carbon::parse($request->end_date)->toDateString()
-            : $now->toDateString();
+            $sessionEndDate = $request->filled('end_date')
+                ? Carbon::parse($request->end_date)->toDateString()
+                : $now->toDateString();
+        }
 
         // ----------------------------------------------
         // CLOSE ANY ACTIVE TRACK WINDOW FOR THIS SESSION
@@ -465,18 +503,19 @@ class WorkSessionController extends Controller
             // =====================================================
             
                 $userId = Auth::user()->id;
-            
-                if ($userId == 173 || $userId == 146) {
-                    $now = Carbon::now()->subHours(2);
-                }elseif($userId == 182){
-                    $now = Carbon::now()->addHours(2);
-                } 
-                else {
-                    $now = Carbon::now();
-                }
-            
+
+            // last_heartbeat is a LIVENESS signal — "we are hearing from this app right now".
+            // It MUST be real server time (config('app.timezone')) so it is directly comparable
+            // to CheckHeartBeat's cutoff of now()->subMinutes(20).
+            //
+            // We deliberately do NOT use:
+            //   - the per-user +/-2h clock hack (it would push last_heartbeat 2h into the past,
+            //     making the every-minute CheckHeartBeat close a perfectly active session for
+            //     users 173/146), nor
+            //   - a queued pulse's original timestamp (a heartbeat that reaches us now proves the
+            //     app is alive now; using a >20-min-old pulse time would close it immediately).
             $updateData = [
-                'last_heartbeat' => $now,
+                'last_heartbeat' => Carbon::now(),
                 'last_heartbeat_type' => $request->type ?? 'Active',
             ];
 

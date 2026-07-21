@@ -1,44 +1,33 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>New Leave Request</title>
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-    <div style="max-width: 600px; margin: 0 auto; background: #fff; border: 1px solid #ddd; padding: 20px;">
-        
-        <h4 style="color: #1E1E1E;">You’ve received a new leave request!</h4>
+@extends('mails.layout', ['title' => 'New leave request', 'preheader' => ($sender_name ?? 'An employee') . ' submitted a leave request'])
 
-        <p>Hello,</p>
+@section('content')
+    <h1 class="h1" style="margin:0 0 16px 0; font-family:Arial,Helvetica,sans-serif; font-size:24px; line-height:30px; font-weight:bold; color:#0f172a;">
+        <span style="font-size:24px;">🌴</span>&nbsp;New leave request
+    </h1>
+    <p style="margin:0 0 20px 0; font-size:15px; line-height:23px; color:#334155;">
+        <strong>{{ $sender_name }}</strong> has submitted a new leave request.
+    </p>
 
-        <p>
-            <strong>{{ $sender_name }}</strong> has submitted a new leave request.
-        </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0; background-color:#f8fafc; border:1px solid #eef2f7; border-radius:10px;">
+        <tr>
+            <td style="padding:12px 18px; font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#64748b; width:40%;">Leave type</td>
+            <td style="padding:12px 18px; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#0f172a; font-weight:bold;" align="right">{{ $leaveType }}</td>
+        </tr>
+        <tr>
+            <td style="padding:12px 18px; border-top:1px solid #eef2f7; font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#64748b;">Start date</td>
+            <td style="padding:12px 18px; border-top:1px solid #eef2f7; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#0f172a; font-weight:bold;" align="right">{{ $startDate->format('d M, Y') }}</td>
+        </tr>
+        <tr>
+            <td style="padding:12px 18px; border-top:1px solid #eef2f7; font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#64748b;">End date</td>
+            <td style="padding:12px 18px; border-top:1px solid #eef2f7; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#0f172a; font-weight:bold;" align="right">{{ $endDate->format('d M, Y') }}</td>
+        </tr>
+    </table>
 
-        <p style="background: #f2f2f2; padding: 10px 15px; border-radius: 4px; border-left: 4px solid #1E1E1E;">
-            <strong>Leave Type:</strong> {{ $leaveType }}<br>
-            <strong>Start Date:</strong> {{ $startDate->format('d M, Y') }}<br>
-            <strong>End Date:</strong> {{ $endDate->format('d M, Y') }}
-        </p>
-
-        <p>
-            Please log in to your account to approve or reject this leave request.
-        </p>
-        
-        
-
-        <p>
-            <a href="https://archilance.org/leaves" 
-               style="display: inline-block; padding: 10px 20px; background: #1E1E1E; color: #fff; 
-                      text-decoration: none; border-radius: 4px;">
-                View Leave Requests
-            </a>
-        </p>
-
-        <p style="margin-top: 20px;">
-            Regards,<br>
-            <strong>{{ config('app.name') }}</strong>
-        </p>
-    </div>
-</body>
-</html>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:6px 0 8px 0;">
+        <tr>
+            <td align="center" bgcolor="#4f46e5" class="btn" style="border-radius:8px; background-color:#4f46e5;">
+                <a href="{{ frontendUrl('/leaves') }}" target="_blank" class="btn-a" style="display:inline-block; padding:13px 30px; font-family:Arial,Helvetica,sans-serif; font-size:15px; font-weight:bold; color:#ffffff; text-decoration:none; border-radius:8px;">Review leave requests</a>
+            </td>
+        </tr>
+    </table>
+@endsection

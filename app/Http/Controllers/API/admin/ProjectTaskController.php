@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\api\admin;
 
 use App\Http\Controllers\Controller;
+use App\Traits\AnnotatesTaskUrgency;
 
 use App\Models\ProjectTask;
 use App\Models\TaskAttachment;
@@ -22,16 +23,22 @@ use App\Helpers\helper;
 
 class ProjectTaskController extends Controller
 {
+    use AnnotatesTaskUrgency;
+
     // ✅ Get all tasks (optionally filtered by project)
     public function index(Request $request)
     {
-        $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments']);
+        $query = ProjectTask::with(['assignees', 'assignees.user', 'creator', 'attachments'])->withCount('subTasks');
 
         if ($request->has('project_id')) {
             $query->where('project_id', $request->project_id);
         }
 
         $tasks = $query->whereNull('parent_task_id')->get();
+
+        if ($request->filled('project_id')) {
+            $this->annotateUrgency($tasks, $this->urgentAncestorSet($request->project_id));
+        }
 
         return response()->json($tasks);
     }
@@ -146,7 +153,7 @@ class ProjectTaskController extends Controller
         $task = ProjectTask::with([
             'assignees',
             'assignees.user',
-            'subTasks',
+            'subTasks' => function ($q) { $q->withCount('subTasks'); },
             'subTasks.creator',
             'subTasks.assignees',
             'subTasks.assignees.user',
@@ -155,6 +162,8 @@ class ProjectTaskController extends Controller
             'allBriefs.attachments',
             'allNotes'
         ])->findOrFail($id);
+
+        $this->annotateUrgency(collect([$task]), $this->urgentAncestorSet($task->project_id));
 
         // 1. ONE query: all sessions for this task (across all employees)
         $allSessions = WorkSession::where('task_id', $task->id)->get();

@@ -86,9 +86,22 @@ class InterneeRatingController extends Controller
     {
         $manager = Auth::user();
 
-        $targetDate = $request->filled('date')
+        // An explicit ?date= keeps the original single-day behaviour (unchanged).
+        // Without it we sweep a window of recent days, OLDEST first, so days the
+        // manager missed are still collected instead of only yesterday.
+        $singleDate = $request->filled('date')
             ? Carbon::parse($request->date)->toDateString()
-            : Carbon::yesterday()->toDateString();
+            : null;
+
+        $rangeEnd = $singleDate ?? Carbon::yesterday()->toDateString();
+
+        if ($singleDate) {
+            $rangeStart = $singleDate;
+        } else {
+            $days = (int) $request->input('days', 7);
+            $days = max(1, min($days, 30));
+            $rangeStart = Carbon::yesterday()->subDays($days - 1)->toDateString();
+        }
 
         $internees = User::where('internee_manager_id', $manager->id)
             ->where('employee_type', 'Internee')
@@ -97,7 +110,9 @@ class InterneeRatingController extends Controller
         if ($internees->isEmpty()) {
             return response()->json([
                 'is_manager' => false,
-                'date' => $targetDate,
+                'date' => $rangeEnd,
+                'date_from' => $rangeStart,
+                'date_to' => $rangeEnd,
                 'total_internees' => 0,
                 'has_pending' => false,
                 'total_pending' => 0,
@@ -108,20 +123,21 @@ class InterneeRatingController extends Controller
 
         $interneeIds = $internees->pluck('id');
 
-        // Sessions that overlap the target date (same overlap logic as User::calculateWorkedTime)
+        // One query for every session that could overlap ANY day in the window.
         $sessions = WorkSession::whereIn('user_id', $interneeIds)
-            ->whereDate('start_date', '<=', $targetDate)
-            ->where(function ($q) use ($targetDate) {
-                $q->whereDate('end_date', '>=', $targetDate)
-                    ->orWhereNull('end_date')
-                    ->orWhereDate('start_date', $targetDate);
+            ->whereDate('start_date', '<=', $rangeEnd)
+            ->where(function ($q) use ($rangeStart) {
+                $q->whereDate('end_date', '>=', $rangeStart)
+                    ->orWhereNull('end_date');
             })
-            ->get(['user_id', 'task_id']);
+            ->get(['user_id', 'task_id', 'start_date', 'end_date']);
 
         if ($sessions->isEmpty()) {
             return response()->json([
                 'is_manager' => true,
-                'date' => $targetDate,
+                'date' => $rangeEnd,
+                'date_from' => $rangeStart,
+                'date_to' => $rangeEnd,
                 'total_internees' => $internees->count(),
                 'has_pending' => false,
                 'total_pending' => 0,
@@ -136,68 +152,108 @@ class InterneeRatingController extends Controller
             ->get(['id', 'parent_task_id', 'task_title', 'project_id'])
             ->keyBy('id');
 
-        // Resolve every worked task up to its root, building unique (internee, root_task) pairs
-        $pairs = collect();
-        foreach ($sessions as $session) {
-            if (!$tasksById->has($session->task_id)) {
-                continue; // task no longer exists
-            }
-
-            $root = $this->resolveRootTask($session->task_id, $tasksById);
-            if (!$root) continue;
-
-            $key = $session->user_id . '-' . $root->id;
-            if (!$pairs->has($key)) {
-                $pairs->put($key, [
-                    'internee_id' => $session->user_id,
-                    'task_id' => $root->id,
-                    'task_title' => $root->task_title,
-                    'project_id' => $root->project_id,
-                ]);
-            }
-        }
-
-        $projectIds = $pairs->pluck('project_id')->filter()->unique()->values();
-        $projectsById = Project::whereIn('id', $projectIds)->get(['id', 'project_name'])->keyBy('id');
-
+        // One query for everything already graded inside the window.
         $existingKeys = InterneeRating::where('manager_id', $manager->id)
             ->whereIn('internee_id', $interneeIds)
-            ->whereDate('rating_date', $targetDate)
-            ->get(['internee_id', 'task_id'])
-            ->map(fn($r) => $r->internee_id . '-' . $r->task_id)
+            ->whereDate('rating_date', '>=', $rangeStart)
+            ->whereDate('rating_date', '<=', $rangeEnd)
+            ->get(['internee_id', 'task_id', 'rating_date'])
+            ->map(function ($r) {
+                return Carbon::parse($r->rating_date)->toDateString() . '|' . $r->internee_id . '-' . $r->task_id;
+            })
             ->flip();
 
         $interneesById = $internees->keyBy('id');
-
+        $rootCache = []; // task_id => root task, so we never re-walk the tree per day
         $pending = [];
-        foreach ($pairs as $key => $pair) {
-            if (isset($existingKeys[$key])) {
-                continue; // already rated
+
+        $cursor = Carbon::parse($rangeStart);
+        $endCursor = Carbon::parse($rangeEnd);
+
+        // Walk each day OLDEST first, so missed days surface before yesterday.
+        while ($cursor->lte($endCursor)) {
+            $day = $cursor->toDateString();
+
+            // Unique (internee, root task) pairs worked on this specific day.
+            $pairs = [];
+            foreach ($sessions as $session) {
+                $start = $session->start_date ? Carbon::parse($session->start_date)->toDateString() : null;
+                $end = $session->end_date ? Carbon::parse($session->end_date)->toDateString() : null;
+
+                if (!$start || $start > $day) {
+                    continue;
+                }
+                // Same overlap rule the original single-date version used.
+                if (!($end === null || $end >= $day || $start === $day)) {
+                    continue;
+                }
+                if (!$tasksById->has($session->task_id)) {
+                    continue; // task no longer exists
+                }
+
+                if (!array_key_exists($session->task_id, $rootCache)) {
+                    $rootCache[$session->task_id] = $this->resolveRootTask($session->task_id, $tasksById);
+                }
+                $root = $rootCache[$session->task_id];
+                if (!$root) {
+                    continue;
+                }
+
+                $key = $session->user_id . '-' . $root->id;
+                if (!isset($pairs[$key])) {
+                    $pairs[$key] = [
+                        'internee_id' => $session->user_id,
+                        'task_id' => $root->id,
+                        'task_title' => $root->task_title,
+                        'project_id' => $root->project_id,
+                    ];
+                }
             }
 
-            $internee = $interneesById->get($pair['internee_id']);
-            $project = $projectsById->get($pair['project_id']);
+            $dayPending = [];
+            foreach ($pairs as $key => $pair) {
+                if (isset($existingKeys[$day . '|' . $key])) {
+                    continue; // already graded for this day
+                }
+                $dayPending[] = $pair;
+            }
 
-            $pending[] = [
-                'internee_id' => $pair['internee_id'],
-                'internee_name' => $internee->name ?? null,
-                'internee_email' => $internee->email ?? null,
-                'internee_profile_pic' => $internee->profile_pic ?? null,
-                'task_id' => $pair['task_id'],
-                'task_title' => $pair['task_title'],
-                'project_id' => $pair['project_id'],
-                'project_name' => $project->project_name ?? null,
-                'rating_date' => $targetDate,
-            ];
+            usort($dayPending, function ($a, $b) {
+                return $a['internee_id'] <=> $b['internee_id'] ?: $a['task_id'] <=> $b['task_id'];
+            });
+
+            foreach ($dayPending as $pair) {
+                $internee = $interneesById->get($pair['internee_id']);
+                $pending[] = [
+                    'internee_id' => $pair['internee_id'],
+                    'internee_name' => $internee->name ?? null,
+                    'internee_email' => $internee->email ?? null,
+                    'internee_profile_pic' => $internee->profile_pic ?? null,
+                    'task_id' => $pair['task_id'],
+                    'task_title' => $pair['task_title'],
+                    'project_id' => $pair['project_id'],
+                    'project_name' => null,
+                    'rating_date' => $day,
+                ];
+            }
+
+            $cursor->addDay();
         }
 
-        usort($pending, function ($a, $b) {
-            return $a['internee_id'] <=> $b['internee_id'] ?: $a['task_id'] <=> $b['task_id'];
-        });
+        // Resolve project names for everything collected, in one query.
+        $projectIds = collect($pending)->pluck('project_id')->filter()->unique()->values();
+        if ($projectIds->isNotEmpty()) {
+            $projectsById = Project::whereIn('id', $projectIds)->get(['id', 'project_name'])->keyBy('id');
+            foreach ($pending as $i => $row) {
+                $pending[$i]['project_name'] = optional($projectsById->get($row['project_id']))->project_name;
+            }
+        }
 
         return response()->json([
             'is_manager' => true,
-            'date' => $targetDate,
+            'date' => $pending[0]['rating_date'] ?? $rangeEnd,
+            'date_from' => $rangeStart,
+            'date_to' => $rangeEnd,
             'total_internees' => $internees->count(),
             'has_pending' => count($pending) > 0,
             'total_pending' => count($pending),
