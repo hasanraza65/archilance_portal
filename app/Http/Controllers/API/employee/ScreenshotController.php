@@ -16,10 +16,12 @@ use Intervention\Image\ImageManager;
 use Intervention\Image\Drivers\Gd\Driver;
 
 use Illuminate\Support\Str;
+use App\Traits\ResolvesClientTime;
 
 
 class ScreenshotController extends Controller
 {
+    use ResolvesClientTime;
 
     public function store(Request $request)
     {
@@ -61,15 +63,44 @@ class ScreenshotController extends Controller
                 'message' => 'No matching work session found for this screenshot.'
             ], 422);
         }
-        // 🔹 3. If screenshot comes in, end any active idle time for this session
-        $openIdle = SessionTimeAdjustment::where('session_id', $currentSession->id)
-            ->whereNull('end_time')
-            ->first();
 
-        if ($openIdle) {
-            $openIdle->end_time = Carbon::now();
-            $openIdle->save();
+        // When was this screenshot actually captured? Prefer the client's UTC capture time
+        // (correct across timezones AND when an offline screenshot is flushed later); fall
+        // back to server now() for older clients.
+        $hasCaptureUtc = $this->hasClientUtc($request->input('captured_utc'));
+        $capturedAt = $this->resolveClientUtc($request->input('captured_utc'), Carbon::now());
+
+        // If this screenshot belongs to a session that was already closed (e.g. the
+        // CheckHeartBeat safety-net closed it while the machine was briefly offline) but the
+        // capture happened AFTER that end, the user was clearly still working — extend the
+        // session end forward to cover it. We NEVER re-open the session.
+        //
+        // IMPORTANT: only do this when we have the REAL capture instant (captured_utc). For an
+        // older client we fall back to now() (= upload time); a late-flushed pre-stop screenshot
+        // would then wrongly push a user-stopped session's end past the real stop. So skip the
+        // extension entirely unless captured_utc was provided (safe: same behaviour as before).
+        if ($hasCaptureUtc && !is_null($currentSession->end_time)) {
+            try {
+                $sessionEnd = Carbon::parse(($currentSession->end_date ?? $currentSession->start_date) . ' ' . $currentSession->end_time);
+                if ($capturedAt->greaterThan($sessionEnd)) {
+                    $currentSession->end_time = $capturedAt;
+                    $currentSession->end_date = $capturedAt->toDateString();
+                    $currentSession->save();
+                }
+            } catch (\Throwable $e) {
+                // leave the session end untouched on any parse issue
+            }
         }
+
+        // NOTE: We intentionally NO LONGER close open idle periods here.
+        //
+        // Idle lifecycle is now managed authoritatively by update-idle-time with an explicit
+        // start/end intent. Closing an idle from a screenshot used the screenshot's captured_utc,
+        // which for an OFFLINE-flushed shot is its ORIGINAL (active-era) capture instant — often
+        // EARLIER than the currently-open idle's start. That produced an inverted (end <= start)
+        // adjustment that the worked-time query drops entirely, silently erasing a real idle
+        // period and billing it as worked time. The client's own idle "end" toggle closes idles
+        // at the correct instant, so this out-of-band close is both redundant and harmful.
 
         // 4. Store Screenshot
         if ($request->hasFile('screenshot_image')) {
@@ -114,7 +145,9 @@ class ScreenshotController extends Controller
             }
 
             $screenshot->session_id = $currentSession->id;
-            $screenshot->created_at = Carbon::now();
+            // Real capture time (UTC-derived) so offline-flushed screenshots keep their true
+            // timestamp instead of clustering at the reconnect/upload moment.
+            $screenshot->created_at = $capturedAt;
             $screenshot->user_id = $userId;
             $screenshot->save();
         }
@@ -218,23 +251,59 @@ class ScreenshotController extends Controller
             'start_time' => 'sometimes|date_format:H:i:s',
             'end_date' => 'sometimes|date_format:Y-m-d',
             'end_time' => 'sometimes|date_format:H:i:s',
+            // UTC event time(s) — preferred (timezone- & offline-correct)
+            'event_utc' => 'sometimes|string',
+            'start_utc' => 'sometimes|string',
+            'end_utc' => 'sometimes|string',
+            // Explicit toggle intent from newer clients: "start" (went idle) / "end" (became active)
+            'idle_action' => 'sometimes|in:start,end',
         ]);
 
         $now = Carbon::now();
+        // The instant this toggle actually happened (client UTC preferred; falls back to now()).
+        $eventTime = $this->resolveClientUtc($request->input('event_utc'), $now);
         $sessionId = $request->session_id;
 
         // ──────────────────────────────────────────────
-        // CASE A: No explicit times supplied → real-time
+        // CASE A: No explicit period supplied → real-time
         //         toggle (open / close) behaviour
         // ──────────────────────────────────────────────
-        if (!$request->has('start_date')) {
+        if (!$request->has('start_date') && !$request->filled('start_utc')) {
+
+            // Explicit toggle intent from newer clients: "start" (user went idle) or "end"
+            // (user became active). Older clients send neither — treated as a legacy toggle.
+            $idleAction = $request->input('idle_action');
 
             $openAdjustment = SessionTimeAdjustment::where('session_id', $sessionId)
                 ->whereNull('end_time')
                 ->first();
 
             if ($openAdjustment) {
-                $openAdjustment->end_time = $now;
+                if ($idleAction === 'start') {
+                    // A "start" while one is already open is an anomaly (a duplicate/retry, or a
+                    // previous "end" that was permanently lost leaving a STALE open idle). Close
+                    // the existing one at this instant and open a fresh one, so a lost "end" can
+                    // never let a single idle run on and swallow later active time. A true
+                    // duplicate is harmless — the two adjacent idles are merged by the
+                    // worked-time query.
+                    $openAdjustment->end_time = $eventTime;
+                    $openAdjustment->save();
+
+                    $newAdjustment = SessionTimeAdjustment::create([
+                        'session_id' => $sessionId,
+                        'start_time' => $eventTime,
+                        'end_time' => null,
+                    ]);
+
+                    return response()->json([
+                        'status' => 'success',
+                        'message' => 'Idle period re-opened.',
+                        'data' => $newAdjustment,
+                    ]);
+                }
+
+                // "end" intent (or a legacy toggle) -> close it.
+                $openAdjustment->end_time = $eventTime;
                 $openAdjustment->save();
 
                 return response()->json([
@@ -244,55 +313,25 @@ class ScreenshotController extends Controller
                 ]);
             }
 
-            // ── Throttle / skip logic ──
-            $lastIdle = SessionTimeAdjustment::where('session_id', $sessionId)
-                ->whereNotNull('end_time')
-                ->latest('end_time')
-                ->first();
-
-            $minGapBetweenIdles = 20;
-            $ignoreSmallBreaksIfWorkedLong = 10;
-            $longWorkThreshold = 60;
-
-            $session = WorkSession::find($sessionId);
-            $sessionStart = $session->start_time ? Carbon::parse($session->start_time) : null;
-            $shouldCreate = true;
-
-            if ($lastIdle) {
-                $lastIdleEndTime = Carbon::parse($lastIdle->end_time);
-                $minutesSinceLastIdle = $lastIdleEndTime->diffInMinutes($now);
-
-                if ($minutesSinceLastIdle < $minGapBetweenIdles) {
-                    $shouldCreate = false;
-                }
-            }
-
-            if ($sessionStart && $shouldCreate) {
-                $lastActivity = $lastIdle ? Carbon::parse($lastIdle->end_time) : $sessionStart;
-                $workedMinutes = $lastActivity->diffInMinutes($now);
-
-                if (
-                    $workedMinutes >= $longWorkThreshold &&
-                    $workedMinutes <= ($longWorkThreshold + $ignoreSmallBreaksIfWorkedLong)
-                ) {
-                    $shouldCreate = false;
-                }
-            }
-
-            $openExists = SessionTimeAdjustment::where('session_id', $sessionId)
-                ->whereNull('end_time')
-                ->exists();
-
-            if (!$shouldCreate || $openExists) {
+            // Nothing is open. An "end" intent (became active) with no open idle MUST be a
+            // no-op — never fabricate an idle period from a "close". This is what keeps
+            // client/server toggle parity from drifting (e.g. after a screenshot or a sleep
+            // event closed the idle out of band). Without this guard, a legitimate stretch of
+            // ACTIVE work would be recorded as idle and subtracted from worked time.
+            if ($idleAction === 'end') {
                 return response()->json([
                     'status' => 'skipped',
-                    'message' => 'Idle period skipped due to recent activity or short gap.',
+                    'message' => 'No open idle period to close.',
                 ]);
             }
 
+            // "start" intent (or a legacy toggle) with nothing open -> open a new idle.
+            // The client only calls this on a GENUINE idle (6+ minutes of no input), so record
+            // it accurately — no more of the old 20-min / 60-70-min "throttle" that billed real
+            // breaks as worked time and suppressed the first idle after a sleep gap.
             $newAdjustment = SessionTimeAdjustment::create([
                 'session_id' => $sessionId,
-                'start_time' => $now,
+                'start_time' => $eventTime,
                 'end_time' => null,
             ]);
 
@@ -304,12 +343,17 @@ class ScreenshotController extends Controller
         }
 
         // ──────────────────────────────────────────────
-        // CASE B: Explicit dates + times supplied
-        //         → offline / catch-up slot with smart
-        //           splitting around existing records
+        // CASE B: Explicit period supplied → offline / catch-up / SLEEP-GAP slot with
+        //         smart splitting around existing records. Used e.g. when the machine slept
+        //         and we record [suspend, resume] as one idle span. Prefer UTC bounds.
         // ──────────────────────────────────────────────
-        $incomingStart = Carbon::parse($request->start_date . ' ' . $request->start_time);
-        $incomingEnd = Carbon::parse($request->end_date . ' ' . $request->end_time);
+        if ($request->filled('start_utc') && $request->filled('end_utc')) {
+            $incomingStart = $this->resolveClientUtc($request->input('start_utc'), $now);
+            $incomingEnd = $this->resolveClientUtc($request->input('end_utc'), $now);
+        } else {
+            $incomingStart = Carbon::parse($request->start_date . ' ' . $request->start_time);
+            $incomingEnd = Carbon::parse($request->end_date . ' ' . $request->end_time);
+        }
 
         if ($incomingStart->gte($incomingEnd)) {
             return response()->json([

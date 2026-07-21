@@ -137,6 +137,10 @@ class TaskCommentController extends Controller
     $notifyMessage = $request->comment_message ?? "Sent an attachment";
     $senderName    = Auth::user()->name;
 
+    // In-app + email notifications (task assignees + admins + tagged users, excluding
+    // the commenter; emails skip customers automatically).
+    commentAddedNotification($request->task_id, $notifyMessage, $taggedUsers);
+
     // ✅ Notify all task assignees (except the commenter)
     $assignees = TaskAssignee::where('task_id', $request->task_id)
         ->where('employee_id', '!=', Auth::id())

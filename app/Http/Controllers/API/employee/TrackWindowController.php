@@ -9,33 +9,52 @@ use App\Models\TrackWindow;
 use App\Models\SessionTimeAdjustment;
 use Carbon\Carbon;
 use DB;
+use App\Traits\ResolvesClientTime;
 
 class TrackWindowController extends Controller
 {
+    use ResolvesClientTime;
+
+    /**
+     * Resolve an entry's window start instant: prefer UTC (timezone- & offline-correct),
+     * fall back to the legacy local start_time string.
+     */
+    private function entryStart(array $entry): Carbon
+    {
+        if (!empty($entry['start_utc'])) {
+            try {
+                return Carbon::parse($entry['start_utc'])->setTimezone(config('app.timezone'));
+            } catch (\Throwable $e) {
+                // fall through to legacy
+            }
+        }
+        return Carbon::parse($entry['start_time']);
+    }
+
     public function store(Request $request)
     {
         $employeeId = Auth::id();
-    
+
         // Normalize input (single OR bulk)
         $entries = isset($request->data) && is_array($request->data)
             ? $request->data
             : [$request->all()];
-    
-        // Sort entries by start_time (VERY IMPORTANT)
+
+        // Sort entries by start instant (VERY IMPORTANT) — UTC-aware.
         usort($entries, function ($a, $b) {
-            return strtotime($a['start_time']) <=> strtotime($b['start_time']);
+            return $this->entryStart($a)->getTimestamp() <=> $this->entryStart($b)->getTimestamp();
         });
-    
+
         $created = [];
-    
+
         DB::beginTransaction();
-    
+
         try {
-    
+
             foreach ($entries as $entry) {
-    
+
                 $sessionId = $entry['session_id'];
-                $newStart  = Carbon::parse($entry['start_time']);
+                $newStart  = $this->entryStart($entry);
     
                 // ----------------------------------------------------
                 // 1. CHECK TIME ADJUSTMENT

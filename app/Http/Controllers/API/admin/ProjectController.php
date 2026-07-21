@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\api\admin;
 
 use App\Http\Controllers\Controller;
+use App\Traits\AnnotatesTaskUrgency;
 use App\Models\ProjectTask;
 use Illuminate\Http\Request;
 use App\Models\Project;
@@ -18,6 +19,8 @@ use Illuminate\Support\Facades\DB;
 
 class ProjectController extends Controller
 {
+    use AnnotatesTaskUrgency;
+
     public function index(Request $request)
     {
         $statusOrder = [
@@ -36,6 +39,9 @@ class ProjectController extends Controller
                     'projectAssignees:id,employee_id,project_id',
                     'projectAssignees.user:id,name,profile_pic',
                 ])
+                ->withCount(['tasks', 'allTasks as urgent_count' => function ($q) {
+                    $q->where('priority', 'Urgent');
+                }])
                 ->when($request->customer_id, function ($query) use ($request) {
                     $query->where('customer_id', $request->customer_id);
                 })
@@ -172,7 +178,7 @@ class ProjectController extends Controller
                 $q->with([
                     'project',
                     'parentTask',
-                ])->where('task_status', '!=', 'Todo');
+                ])->withCount('subTasks')->where('task_status', '!=', 'Todo');
             }
         ])
             ->withCount([
@@ -254,6 +260,7 @@ class ProjectController extends Controller
                 $message = $from_user->name . " has assigned you a job " . $project_detail->project_name;
 
                 insertNotificationWithNature($user->id, \Auth::user()->id, "project_assigned", $message, $nature, $projectId);
+                sendAssignmentEmail($user, \Auth::user(), "project_assigned", $projectId);
             }
 
         }
@@ -310,6 +317,7 @@ class ProjectController extends Controller
                 $message = $from_user->name . " has assigned you a job " . $project_detail->project_name;
 
                 insertNotificationWithNature($user->id, \Auth::user()->id, "project_assigned", $message, $nature, $projectId);
+                sendAssignmentEmail($user, \Auth::user(), "project_assigned", $projectId);
 
             }
         }
@@ -339,7 +347,7 @@ class ProjectController extends Controller
             'projectAssignees.user',
             'customer',
             'allTasks',
-            'tasks',
+            'tasks' => function ($q) { $q->withCount('subTasks'); },
             'tasks.creator',
             'tasks.assignees',
             'tasks.assignees.user',
@@ -348,6 +356,9 @@ class ProjectController extends Controller
             'allBriefs.attachments',
             'allNotes'
         ])->findOrFail($id);
+
+        // Flag parent tasks that have an Urgent task nested inside them.
+        $this->annotateUrgency($project->tasks, $this->urgentAncestorSet($project->id));
 
         $startDateFilter = $request->summary_start_date ?? null;
         $endDateFilter   = $request->summary_end_date   ?? null;

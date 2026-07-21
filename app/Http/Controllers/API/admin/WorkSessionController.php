@@ -110,43 +110,63 @@ class WorkSessionController extends Controller
                 $workEnd = min($sessionEnd, $dayEnd);
                 
                 if ($workStart->lt($workEnd)) {
-                    $sessionDuration += $workEnd->diffInSeconds($workStart);
+                    // abs()+int: Carbon 3's diffInSeconds is signed (later->earlier is negative).
+                    $sessionDuration += (int) abs($workEnd->diffInSeconds($workStart));
                 }
             }
 
-            // Calculate adjustments for the filtered period
+            // Calculate adjustments for the filtered period.
             $adjustmentSeconds = 0;
             $adjustments = DB::table('session_time_adjustments')
                 ->where('session_id', $session->id)
                 ->get();
 
+            // MERGE overlapping idle intervals first so an overlap is never double-subtracted.
+            $intervals = [];
             foreach ($adjustments as $adj) {
                 if (empty($adj->start_time) || empty($adj->end_time)) {
                     continue;
                 }
-                
-                $adjStart = Carbon::parse($adj->start_time);
-                $adjEnd = Carbon::parse($adj->end_time);
-                
+                $s = Carbon::parse($adj->start_time);
+                $e = Carbon::parse($adj->end_time);
+                if ($e->lte($s)) {
+                    continue;
+                }
+                $intervals[] = [$s, $e];
+            }
+            usort($intervals, fn($a, $b) => $a[0]->getTimestamp() <=> $b[0]->getTimestamp());
+
+            $merged = [];
+            foreach ($intervals as $iv) {
+                $n = count($merged);
+                if ($n === 0 || $iv[0]->gt($merged[$n - 1][1])) {
+                    $merged[] = $iv;
+                } elseif ($iv[1]->gt($merged[$n - 1][1])) {
+                    $merged[$n - 1][1] = $iv[1];
+                }
+            }
+
+            foreach ($merged as [$adjStart, $adjEnd]) {
                 // Calculate adjustments day by day to respect midnight boundaries
                 foreach ($filterDates as $date) {
                     $dayStart = Carbon::parse($date)->startOfDay();
                     $dayEnd = Carbon::parse($date)->endOfDay();
-                    
+
                     $adjStartFiltered = max($adjStart, $dayStart);
                     $adjEndFiltered = min($adjEnd, $dayEnd);
-                    
+
                     if ($adjStartFiltered->lt($adjEndFiltered)) {
-                        $adjustmentSeconds += $adjEndFiltered->diffInSeconds($adjStartFiltered);
+                        $adjustmentSeconds += (int) abs($adjEndFiltered->diffInSeconds($adjStartFiltered));
                     }
                 }
             }
 
-            $netSeconds = $sessionDuration - $adjustmentSeconds;
-            
+            // Clamp at 0 and force integer (worked time is never negative; % 3600 needs an int).
+            $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
+
             if ($session->total_time !== 'Running') {
-                $hours = floor(abs($netSeconds) / 3600);
-                $minutes = floor((abs($netSeconds) % 3600) / 60);
+                $hours = floor($netSeconds / 3600);
+                $minutes = floor(($netSeconds % 3600) / 60);
                 $session->total_time = sprintf('%dh %dm', $hours, $minutes);
                 $time_strings_hr[] = $session->total_time;
             }

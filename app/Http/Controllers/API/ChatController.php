@@ -113,6 +113,9 @@ class ChatController extends Controller
             }
         }
     
+        // In-app notification (always) + professional email (respecting the smart gating above)
+        chatMessageNotification($receiver, Auth::user(), $request->message, $shouldSendEmail);
+
         // Send email
         /*
         if ($shouldSendEmail) {
@@ -154,10 +157,12 @@ class ChatController extends Controller
             $this->sendFcmNotification($receiver->fcm_token, $title, $body );
         }
 
-        // Update last email sent time
-        $receiver->update([
-            'last_message_email_sent_at' => now()
-        ]);
+        // Record when we actually emailed, so the 10-min throttle above stays meaningful
+        if ($shouldSendEmail) {
+            $receiver->update([
+                'last_message_email_sent_at' => now()
+            ]);
+        }
     
         return response()->json([
             'message' => 'Message sent.',

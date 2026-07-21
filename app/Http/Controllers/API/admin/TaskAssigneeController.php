@@ -169,6 +169,7 @@ class TaskAssigneeController extends Controller
                 $message = $from_user->name . " has assigned you a project " . $project_detail->task_title;
 
                 insertNotificationWithNature($user->id, \Auth::user()->id, "task_assigned", $message, $nature, $projectId);
+                sendAssignmentEmail($user, \Auth::user(), "task_assigned", $projectId);
             }
     }
 
