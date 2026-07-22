@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\employee;
 
 use App\Http\Controllers\Controller;
+use App\Traits\CalculatesIdleTime;
 use App\Traits\AnnotatesTaskUrgency;
 use Illuminate\Http\Request;
 
@@ -23,7 +24,7 @@ use Illuminate\Support\Facades\Auth;
 
 class ProjectTaskController extends Controller
 {
-    use AnnotatesTaskUrgency;
+    use AnnotatesTaskUrgency, CalculatesIdleTime;
 
     // ✅ Get all tasks (optionally filtered by project)
     public function index(Request $request)
@@ -278,26 +279,16 @@ class ProjectTaskController extends Controller
                     $sessionDuration = -$sessionDuration;
                 }
 
-                $adjustmentSeconds = 0;
+                // Merge overlapping idle rows and clamp them to this session's own window,
+                // so the same minute can never be subtracted twice and idle can never
+                // exceed the session duration.
+                $adjustmentSeconds = $this->sessionIdleSeconds(
+                    $adjustmentsBySession->get($session->id, collect()),
+                    $sessionStart,
+                    $sessionEnd
+                );
 
-                foreach ($adjustmentsBySession->get($session->id, collect()) as $adj) {
-
-                    if (empty($adj->start_time) || empty($adj->end_time)) {
-                        continue;
-                    }
-
-                    try {
-                        $dur = Carbon::parse($adj->end_time)
-                            ->diffInSeconds(Carbon::parse($adj->start_time));
-
-                        $adjustmentSeconds += ($dur < 0 ? -$dur : $dur);
-
-                    } catch (\Exception $e) {
-                        continue;
-                    }
-                }
-
-                $netSeconds = $sessionDuration - $adjustmentSeconds;
+                $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
 
                 if ($netSeconds > 0) {
                     $totalSeconds += $netSeconds;

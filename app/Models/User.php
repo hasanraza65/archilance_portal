@@ -9,11 +9,12 @@ use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Carbon\Carbon;
+use App\Traits\CalculatesIdleTime;
 
 class User extends Authenticatable
 {
     /** @use HasFactory<\Database\Factories\UserFactory> */
-    use HasApiTokens, HasFactory, Notifiable;
+    use HasApiTokens, HasFactory, Notifiable, CalculatesIdleTime;
 
     /**
      * The attributes that are mass assignable.
@@ -153,17 +154,24 @@ class User extends Authenticatable
             }
         }
 
-        // Adjustments
+        // Adjustments (idle). Overlapping idle rows are MERGED first so the same minute is
+        // never subtracted twice, and each interval is clamped to this session's own window
+        // so a stale row can never remove more time than the session actually contains.
         $adjustmentSeconds = 0;
         $adjustments = \DB::table('session_time_adjustments')
             ->where('session_id', $session->id)
             ->get();
 
-        foreach ($adjustments as $adj) {
-            if (!$adj->start_time || !$adj->end_time) continue;
+        foreach ($this->mergeIdleIntervals($adjustments) as $mergedInterval) {
+            [$mergedStart, $mergedEnd] = $mergedInterval;
 
-            $adjStart = Carbon::parse($adj->start_time);
-            $adjEnd = Carbon::parse($adj->end_time);
+            // Clamp to the session bounds before the per-day split.
+            $adjStart = $mergedStart->greaterThan($sessionStart) ? $mergedStart->copy() : $sessionStart->copy();
+            $adjEnd = $mergedEnd->lessThan($sessionEnd) ? $mergedEnd->copy() : $sessionEnd->copy();
+
+            if ($adjEnd->lte($adjStart)) {
+                continue;
+            }
 
             foreach ($filterDates as $date) {
                 $dayStart = Carbon::parse($date)->startOfDay();
@@ -174,12 +182,12 @@ class User extends Authenticatable
                 $end = $adjEnd->min($dayEnd);
 
                 if ($start->lt($end)) {
-                    $adjustmentSeconds += $start->diffInSeconds($end); // FIX: Correct order
+                    $adjustmentSeconds += (int) abs($start->diffInSeconds($end));
                 }
             }
         }
 
-        $netSeconds = $sessionDuration - $adjustmentSeconds;
+        $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
         if ($netSeconds > 0) {
             $totalSeconds += $netSeconds;
         }

@@ -139,6 +139,14 @@ class WorkSessionController extends Controller
                 }
 
                 foreach ($merged as [$adjStart, $adjEnd]) {
+                    // Clamp to the session's own window first, so a stale idle row can never
+                    // remove more time than the session actually contains.
+                    $adjStart = $adjStart->greaterThan($sessionStart) ? $adjStart->copy() : $sessionStart->copy();
+                    $adjEnd = $adjEnd->lessThan($sessionEnd) ? $adjEnd->copy() : $sessionEnd->copy();
+                    if ($adjEnd->lte($adjStart)) {
+                        continue;
+                    }
+
                     // Calculate adjustments day by day to respect midnight boundaries
                     foreach ($filterDates as $date) {
                         $dayStart = Carbon::parse($date)->startOfDay();
@@ -159,6 +167,12 @@ class WorkSessionController extends Controller
                 // hours/minutes math below relies on an int (% 3600). (Previously used abs(),
                 // which turned a double-subtract error into a bogus POSITIVE total.)
                 $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
+
+                // Expose the MERGED, session-clamped idle total so the UI never has to sum the raw
+                // (possibly overlapping) idleTimes rows itself — that summing is what made displayed
+                // idle exceed the worked time.
+                $session->idle_seconds = $adjustmentSeconds;
+                $session->idle_time_formatted = sprintf('%dh %dm', floor($adjustmentSeconds / 3600), floor(($adjustmentSeconds % 3600) / 60));
 
                 if ($session->total_time !== 'Running') {
                     $hours = floor($netSeconds / 3600);

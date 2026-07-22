@@ -210,12 +210,41 @@ class ScreenshotController extends Controller
                 ? $screenshot->created_at
                 : $screenshot->created_at->copy(); // If last, adjust only that point
 
-            // Log this time removal
-            SessionTimeAdjustment::create([
-                'session_id' => $session->id,
-                'start_time' => $adjustStart,
-                'end_time' => $adjustEnd,
-            ]);
+            // Log this time removal — but ONLY for the parts of the range that are not
+            // already covered by an existing idle record. Blindly inserting the whole
+            // [previous screenshot -> this screenshot] span was a primary source of
+            // OVERLAPPING idle rows: the employee is frequently idle during part of those
+            // 4-9 minutes, so an idle row already existed and the overlap then got
+            // subtracted twice from worked time.
+            $adjustStartAt = Carbon::parse($adjustStart);
+            $adjustEndAt = Carbon::parse($adjustEnd);
+
+            if ($adjustEndAt->gt($adjustStartAt)) {
+                // CLOSED rows only — an open row has no end, so subtractSlots would expand it
+                // to "now" and one stale open row would swallow this entire range, leaving the
+                // deleted screenshot's time still billed. Closed rows are also precisely what
+                // the readers count.
+                $overlappingIdle = SessionTimeAdjustment::where('session_id', $session->id)
+                    ->whereNotNull('end_time')
+                    ->where('start_time', '<', $adjustEndAt)
+                    ->where('end_time', '>', $adjustStartAt)
+                    ->orderBy('start_time')
+                    ->get();
+
+                foreach ($this->subtractSlots($adjustStartAt, $adjustEndAt, $overlappingIdle) as $freeSlot) {
+                    [$freeStart, $freeEnd] = $freeSlot;
+
+                    if ($freeEnd->lte($freeStart)) {
+                        continue;
+                    }
+
+                    SessionTimeAdjustment::create([
+                        'session_id' => $session->id,
+                        'start_time' => $freeStart,
+                        'end_time' => $freeEnd,
+                    ]);
+                }
+            }
 
             // Delete screenshot file
             if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
@@ -248,9 +277,12 @@ class ScreenshotController extends Controller
         $request->validate([
             'session_id' => 'required|exists:work_sessions,id',
             'start_date' => 'sometimes|date_format:Y-m-d',
-            'start_time' => 'sometimes|date_format:H:i:s',
+            // Accept BOTH a bare time ("14:30:00") and a full datetime
+            // ("2026-07-21 14:30:00"). Older tracker builds send the latter, which used to
+            // fail validation with a 422 that the client silently swallowed.
+            'start_time' => 'sometimes|date_format:H:i:s,Y-m-d H:i:s',
             'end_date' => 'sometimes|date_format:Y-m-d',
-            'end_time' => 'sometimes|date_format:H:i:s',
+            'end_time' => 'sometimes|date_format:H:i:s,Y-m-d H:i:s',
             // UTC event time(s) — preferred (timezone- & offline-correct)
             'event_utc' => 'sometimes|string',
             'start_utc' => 'sometimes|string',
@@ -264,6 +296,39 @@ class ScreenshotController extends Controller
         $eventTime = $this->resolveClientUtc($request->input('event_utc'), $now);
         $sessionId = $request->session_id;
 
+        // An idle row cannot begin before its session did, and session START never moves,
+        // so pulling a moment UP to it is always safe.
+        //
+        // We deliberately do NOT clamp DOWN to the session END here. session end is not a
+        // stable value at write time: CheckHeartBeat back-dates it to the last heartbeat /
+        // screenshot, and ScreenshotController::store() later pushes it forward again when a
+        // late screenshot arrives. Screenshots are only taken while the user is ACTIVE, so
+        // the stored end lags precisely when an idle "end" is being reported. Clamping to it
+        // would permanently truncate (or invert) a real idle period. Bounding idle to the
+        // session window is instead done at READ time (App\Traits\CalculatesIdleTime), which
+        // always uses the session's current end and therefore self-corrects.
+        $session = WorkSession::find($sessionId);
+        $sessionStart = null;
+
+        if ($session) {
+            try {
+                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+            } catch (\Throwable $e) {
+                $sessionStart = null;
+            }
+        }
+
+        // Pull a moment up to the session start (no upper bound — see note above).
+        $clampToSessionStart = function (Carbon $moment) use ($sessionStart) {
+            $result = $moment->copy();
+            if ($sessionStart && $result->lt($sessionStart)) {
+                $result = $sessionStart->copy();
+            }
+            return $result;
+        };
+
+        $eventTime = $clampToSessionStart($eventTime);
+
         // ──────────────────────────────────────────────
         // CASE A: No explicit period supplied → real-time
         //         toggle (open / close) behaviour
@@ -273,6 +338,15 @@ class ScreenshotController extends Controller
             // Explicit toggle intent from newer clients: "start" (user went idle) or "end"
             // (user became active). Older clients send neither — treated as a legacy toggle.
             $idleAction = $request->input('idle_action');
+
+            // Legacy clients send no idle_action. One that supplies only an END
+            // (end_time / end_utc, with no start) is semantically a CLOSE, so treat it as
+            // such. Without this it falls through to the "open a new idle" branch below and
+            // FABRICATES an idle period whenever none is open — silently converting active
+            // work into idle. Read as "end", the worst case is a harmless no-op.
+            if (!$idleAction && ($request->filled('end_time') || $request->filled('end_utc'))) {
+                $idleAction = 'end';
+            }
 
             $openAdjustment = SessionTimeAdjustment::where('session_id', $sessionId)
                 ->whereNull('end_time')
@@ -302,8 +376,11 @@ class ScreenshotController extends Controller
                     ]);
                 }
 
-                // "end" intent (or a legacy toggle) -> close it.
-                $openAdjustment->end_time = $eventTime;
+                // "end" intent (or a legacy toggle) -> close it. Never write an end that is
+                // EARLIER than the row's own start (clock skew / a late duplicate would
+                // otherwise leave an inverted row that every reader silently discards).
+                $openStart = Carbon::parse($openAdjustment->start_time);
+                $openAdjustment->end_time = $eventTime->greaterThan($openStart) ? $eventTime : $openStart;
                 $openAdjustment->save();
 
                 return response()->json([
@@ -322,6 +399,23 @@ class ScreenshotController extends Controller
                 return response()->json([
                     'status' => 'skipped',
                     'message' => 'No open idle period to close.',
+                ]);
+            }
+
+            // A retry / duplicate (offline queue re-send, second app instance) can arrive for a
+            // moment that is ALREADY inside a closed idle row — e.g. a sleep-gap slot written by
+            // CASE B. Creating another row here is exactly what produced OVERLAPPING idle
+            // periods, so skip it instead.
+            $alreadyCovered = SessionTimeAdjustment::where('session_id', $sessionId)
+                ->whereNotNull('end_time')
+                ->where('start_time', '<=', $eventTime)
+                ->where('end_time', '>', $eventTime)
+                ->exists();
+
+            if ($alreadyCovered) {
+                return response()->json([
+                    'status' => 'skipped',
+                    'message' => 'This moment is already inside a recorded idle period.',
                 ]);
             }
 
@@ -351,8 +445,8 @@ class ScreenshotController extends Controller
             $incomingStart = $this->resolveClientUtc($request->input('start_utc'), $now);
             $incomingEnd = $this->resolveClientUtc($request->input('end_utc'), $now);
         } else {
-            $incomingStart = Carbon::parse($request->start_date . ' ' . $request->start_time);
-            $incomingEnd = Carbon::parse($request->end_date . ' ' . $request->end_time);
+            $incomingStart = $this->combineDateAndTime($request->start_date, $request->start_time);
+            $incomingEnd = $this->combineDateAndTime($request->end_date, $request->end_time);
         }
 
         if ($incomingStart->gte($incomingEnd)) {
@@ -362,7 +456,22 @@ class ScreenshotController extends Controller
             ], 422);
         }
 
-        // Fetch every existing closed slot that overlaps [incomingStart, incomingEnd]
+        // Never begin before the session did (session start is stable; the END is not — see
+        // the note at the top of this method, bounding against it happens at read time).
+        $incomingStart = $clampToSessionStart($incomingStart);
+
+        if ($incomingStart->gte($incomingEnd)) {
+            return response()->json([
+                'status' => 'skipped',
+                'message' => 'Nothing of this period falls inside the session window.',
+            ]);
+        }
+
+        // Carve around existing CLOSED slots that overlap [incomingStart, incomingEnd].
+        // Deliberately CLOSED-only: an open row has no end, so subtractSlots would expand it
+        // to "now" and a single stale open row would swallow this whole range, silently
+        // dropping a real sleep gap. Closed rows are also exactly what the readers count, and
+        // any residual overlap with a row that is closed later is merged away at read time.
         $existingSlots = SessionTimeAdjustment::where('session_id', $sessionId)
             ->whereNotNull('end_time')
             ->where('start_time', '<', $incomingEnd)
@@ -409,6 +518,27 @@ class ScreenshotController extends Controller
     }
 
     /**
+     * Build a Carbon from a date + time pair, tolerating BOTH client conventions:
+     *   - a bare time ("14:30:00") that needs its companion date, and
+     *   - a full datetime ("2026-07-21 14:30:00") already carrying its own date.
+     *
+     * Older tracker builds send the full datetime in the *_time field; naively
+     * concatenating would produce "2026-07-21 2026-07-21 14:30:00".
+     */
+    private function combineDateAndTime($date, $time): Carbon
+    {
+        $time = trim((string) $time);
+
+        // Bare "H:i" / "H:i:s" -> needs the companion date.
+        if (preg_match('/^\d{1,2}:\d{2}(:\d{2})?$/', $time)) {
+            return Carbon::parse(trim((string) $date) . ' ' . $time);
+        }
+
+        // Already a full datetime — use it as-is.
+        return Carbon::parse($time);
+    }
+
+    /**
      * Given a range [rangeStart, rangeEnd] and a sorted collection of existing
      * slots, return the free sub-intervals with existing slots punched out.
      *
@@ -426,8 +556,12 @@ class ScreenshotController extends Controller
         $cursor = $rangeStart->copy();
 
         foreach ($existingSlots as $slot) {
+            // A still-open row (end_time NULL) is treated as running up to now, so the
+            // incoming period is carved around it rather than written over it.
+            $rawSlotEnd = !empty($slot->end_time) ? Carbon::parse($slot->end_time) : Carbon::now();
+
             $slotStart = Carbon::parse($slot->start_time)->max($rangeStart);
-            $slotEnd = Carbon::parse($slot->end_time)->min($rangeEnd);
+            $slotEnd = $rawSlotEnd->min($rangeEnd);
 
             // Free gap before this existing slot
             if ($cursor->lt($slotStart)) {

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\customer;
 
 use App\Http\Controllers\Controller;
+use App\Traits\CalculatesIdleTime;
 use Illuminate\Http\Request;
 
 use App\Models\ProjectTask;
@@ -14,6 +15,8 @@ use App\Models\WorkSession;
 
 class ProjectTaskController extends Controller
 {
+    use CalculatesIdleTime;
+
     public function index(Request $request)
     {
         $query = ProjectTask::with(['assignees', 'assignees.user', 'comments', 'creator', 'attachments']);
@@ -116,31 +119,10 @@ class ProjectTaskController extends Controller
                     ->where('session_id', $session->id)
                     ->get();
 
-              //  \Log::info("Found " . $adjustments->count() . " adjustments for session");
-
-                foreach ($adjustments as $adj) {
-                    if (empty($adj->start_time) || empty($adj->end_time)) {
-                      //  \Log::warning("Invalid adjustment times for session: " . $session->id);
-                        continue;
-                    }
-                    
-                    try {
-                        $adjStart = Carbon::parse($adj->start_time);
-                        $adjEnd = Carbon::parse($adj->end_time);
-                        $adjustmentDuration = $adjEnd->diffInSeconds($adjStart);
-                        
-                        // Ensure adjustment duration is positive
-                        if ($adjustmentDuration < 0) {
-                            $adjustmentDuration = $adjStart->diffInSeconds($adjEnd);
-                        }
-                        
-                        $adjustmentSeconds += $adjustmentDuration;
-                       // \Log::info("Adjustment duration: $adjustmentDuration seconds");
-                    } catch (\Exception $e) {
-                     //   \Log::error("Error parsing adjustment times: " . $e->getMessage());
-                        continue;
-                    }
-                }
+                // Merge overlapping idle rows and clamp them to this session's own window,
+                // so the same minute can never be subtracted twice and idle can never
+                // exceed the session duration.
+                $adjustmentSeconds = $this->sessionIdleSeconds($adjustments, $sessionStart, $sessionEnd);
 
                 $netSeconds = $sessionDuration - $adjustmentSeconds;
                // \Log::info("Net seconds after adjustments: $netSeconds");

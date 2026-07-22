@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\customer;
 
 use App\Http\Controllers\Controller;
+use App\Traits\CalculatesIdleTime;
 use Illuminate\Http\Request;
 use App\Models\Project;
 use App\Models\ProjectTask;
@@ -15,6 +16,8 @@ use Illuminate\Support\Facades\DB;
 
 class ProjectController extends Controller
 {
+    use CalculatesIdleTime;
+
     public function index()
     {
         $user = Auth::user();
@@ -253,21 +256,11 @@ class ProjectController extends Controller
                 $adjustments = DB::table('session_time_adjustments')
                     ->where('session_id', $session->id)
                     ->get();
-    
-                foreach ($adjustments as $adj) {
-                    if (empty($adj->start_time) || empty($adj->end_time)) {
-                        continue;
-                    }
-    
-                    try {
-                        $adjStart = Carbon::parse($adj->start_time);
-                        $adjEnd = Carbon::parse($adj->end_time);
-                        $adjustmentDuration = abs($adjEnd->diffInSeconds($adjStart));
-                        $adjustmentSeconds += $adjustmentDuration;
-                    } catch (\Exception $e) {
-                        continue;
-                    }
-                }
+
+                // Merge overlapping idle rows and clamp them to this session's own window,
+                // so the same minute can never be subtracted twice and idle can never
+                // exceed the session duration.
+                $adjustmentSeconds = $this->sessionIdleSeconds($adjustments, $sessionStart, $sessionEnd);
     
                 // Compute net worked time
                 $netSeconds = $sessionDuration - $adjustmentSeconds;
