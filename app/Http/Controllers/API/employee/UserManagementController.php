@@ -34,30 +34,121 @@ class UserManagementController extends Controller
     }
 
 
+    /**
+     * Optional ?employee_type= filter. Opt-in: when the parameter is absent the query is
+     * left untouched, so existing clients behave exactly as before.
+     *
+     * Accepts:
+     *   ?employee_type=Manager                 single type, matched literally
+     *   ?employee_type=Employee                also literal — plain employees are stored as
+     *                                          the string 'Employee' in some rows
+     *   ?employee_type=Manager,Executive       comma-separated list
+     *   ?employee_type=none                    rows where the column is NULL or '' (store()
+     *                                          writes '' when no type is supplied)
+     *   ?employee_type=Employee,none           literal 'Employee' OR no-type-set — use this
+     *                                          when the data contains a mix of both
+     *
+     * The whole condition is wrapped in one group so it ANDs cleanly with any existing
+     * OR-based visibility rules on the query.
+     */
+    private function applyEmployeeTypeFilter($query, Request $request)
+    {
+        if (!$request->filled('employee_type')) {
+            return $query;
+        }
+
+        $requested = collect(explode(',', (string) $request->input('employee_type')))
+            ->map(fn($t) => trim($t))
+            ->filter()
+            ->values();
+
+        $isNoneToken = fn($t) => in_array(strtolower($t), ['none', 'null'], true);
+
+        $wantsNone = $requested->contains($isNoneToken);
+        $named = $requested->reject($isNoneToken)->values()->all();
+
+        // Nothing usable was supplied (e.g. "?employee_type=,,") — leave the query alone.
+        if (empty($named) && !$wantsNone) {
+            return $query;
+        }
+
+        return $query->where(function ($q) use ($named, $wantsNone) {
+            if (!empty($named)) {
+                $q->whereIn('employee_type', $named);
+            }
+
+            if ($wantsNone) {
+                if (empty($named)) {
+                    $q->whereNull('employee_type')->orWhere('employee_type', '');
+                } else {
+                    $q->orWhereNull('employee_type')->orWhere('employee_type', '');
+                }
+            }
+        });
+    }
+
+
     public function index(Request $request)
     {
         $roleId = $this->getRoleFromRequest($request);
         $user = Auth::user();
 
+        // NOTE: the visibility rules below are wrapped in ONE outer group. Without that
+        // wrapper, appending any further ->where() (e.g. the employee_type filter) would bind
+        // tighter than the orWhere and produce
+        //     (role AND type != 'Manager') OR (id = X AND filter)
+        // which would let the "exclude Managers" restriction leak. Wrapped, we always get
+        //     ((role AND type != 'Manager') OR id = X) AND filter
+        // With no filter applied the wrapper is logically identical to the previous query.
         if ($user->employee_type !== "Executive") {
             // Non-Executives: see role users but exclude Managers
-            $users = User::where(function ($query) use ($roleId) {
-                $query->where('user_role', $roleId)
-                    ->where('employee_type', '!=', 'Manager');
-            })
-                ->orWhere('id', $user->id) // include logged-in user
-                ->get();
+            $query = User::where(function ($outer) use ($roleId, $user) {
+                $outer->where(function ($query) use ($roleId) {
+                    $query->where('user_role', $roleId)
+                        ->where('employee_type', '!=', 'Manager');
+                })
+                    ->orWhere('id', $user->id); // include logged-in user
+            });
         } else {
             // Executives: see role users including Managers
-            $users = User::where('user_role', $roleId)
-                ->orWhere('id', $user->id) // include logged-in user
-                ->get();
+            $query = User::where(function ($outer) use ($roleId, $user) {
+                $outer->where('user_role', $roleId)
+                    ->orWhere('id', $user->id); // include logged-in user
+            });
+        }
+
+        // Optional employee_type filter — applied ON TOP of the visibility rules above, so a
+        // non-Executive asking for ?employee_type=Manager correctly gets an empty list rather
+        // than bypassing the restriction.
+        $this->applyEmployeeTypeFilter($query, $request);
+
+        // OPT-IN pagination: only when the client actually asks for it (page / per_page).
+        // Clients that send neither keep receiving the full plain array exactly as before,
+        // so the existing frontend is unaffected by a backend-only deploy.
+        $wantsPagination = $request->filled('page') || $request->filled('per_page');
+        $paginator = null;
+
+        if ($wantsPagination) {
+            $perPage = (int) $request->input('per_page', 25);
+            $perPage = max(1, min($perPage, 200));
+            $paginator = $query->paginate($perPage);
+            $users = $paginator->getCollection();
+        } else {
+            $users = $query->get();
         }
 
         // today_time / week_time are only needed on the employee tracking list.
-        // Appended here (not globally) to avoid work_session N+1 everywhere else.
+        // Filled for the whole page in 2 queries instead of the accessors' per-user,
+        // per-session queries (the N+1 that made this list slow).
         if ($roleId === 3) {
+            User::preloadWorkedTimes($users);
             $users->each->append(['today_time', 'week_time']);
+        }
+
+        if ($wantsPagination) {
+            // Same standard Laravel envelope ({ data, current_page, last_page, total, ... }).
+            $paginator->setCollection($users);
+            return response()->json($paginator);
         }
 
         return response()->json($users);
@@ -127,6 +218,8 @@ class UserManagementController extends Controller
             'user_role' => $roleId,
             'employee_type' => $request->employee_type ?? '',
             'internee_manager_id' => $request->internee_manager_id ?? null,
+            'manager_id' => $request->manager_id ?? null,
+            'probation_period_end_date' => $request->probation_period_end_date,
             'subscription_from' => $request->subscription_from ?? null
         ]);
 
@@ -181,6 +274,8 @@ class UserManagementController extends Controller
             'phone' => $request->phone,
             'employee_type' => $request->employee_type,
             'internee_manager_id' => $request->internee_manager_id,
+            'manager_id' => $request->manager_id,
+            'probation_period_end_date' => $request->probation_period_end_date,
             'subscription_from' => $request->subscription_from ?? null
         ];
 

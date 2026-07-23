@@ -33,18 +33,93 @@ class UserManagementController extends Controller
     }
 
 
+    /**
+     * Optional ?employee_type= filter. Opt-in: when the parameter is absent the query is
+     * left untouched, so existing clients behave exactly as before.
+     *
+     * Accepts:
+     *   ?employee_type=Manager                 single type, matched literally
+     *   ?employee_type=Employee                also literal — plain employees are stored as
+     *                                          the string 'Employee' in some rows
+     *   ?employee_type=Manager,Executive       comma-separated list
+     *   ?employee_type=none                    rows where the column is NULL or '' (store()
+     *                                          writes '' when no type is supplied)
+     *   ?employee_type=Employee,none           literal 'Employee' OR no-type-set — use this
+     *                                          when the data contains a mix of both
+     */
+    private function applyEmployeeTypeFilter($query, Request $request)
+    {
+        if (!$request->filled('employee_type')) {
+            return $query;
+        }
+
+        $requested = collect(explode(',', (string) $request->input('employee_type')))
+            ->map(fn($t) => trim($t))
+            ->filter()
+            ->values();
+
+        $isNoneToken = fn($t) => in_array(strtolower($t), ['none', 'null'], true);
+
+        $wantsNone = $requested->contains($isNoneToken);
+        $named = $requested->reject($isNoneToken)->values()->all();
+
+        if (empty($named) && !$wantsNone) {
+            return $query;
+        }
+
+        return $query->where(function ($q) use ($named, $wantsNone) {
+            if (!empty($named)) {
+                $q->whereIn('employee_type', $named);
+            }
+
+            if ($wantsNone) {
+                if (empty($named)) {
+                    $q->whereNull('employee_type')->orWhere('employee_type', '');
+                } else {
+                    $q->orWhereNull('employee_type')->orWhere('employee_type', '');
+                }
+            }
+        });
+    }
+
+
     public function index(Request $request)
     {
         $roleId = $this->getRoleFromRequest($request);
 
-        $users = User::where('user_role', $roleId)
+        $query = User::where('user_role', $roleId)
             ->when($roleId === 3, function ($query) {
                 // Only for employee-user
                 $query->with(['workSessions' => function ($q) {
                     $q->latest('id')->limit(1);
                 }]);
-            })
-            ->get()
+            });
+
+        // Optional ?employee_type= filter (no-op when the param is absent).
+        $this->applyEmployeeTypeFilter($query, $request);
+
+        // OPT-IN pagination: only when the client actually asks for it (page / per_page).
+        // Clients that send neither keep receiving the full plain array exactly as before,
+        // so the existing frontend is unaffected by a backend-only deploy.
+        $wantsPagination = $request->filled('page') || $request->filled('per_page');
+        $paginator = null;
+
+        if ($wantsPagination) {
+            $perPage = (int) $request->input('per_page', 25);
+            $perPage = max(1, min($perPage, 200));
+            $paginator = $query->paginate($perPage);
+            $users = $paginator->getCollection();
+        } else {
+            $users = $query->get();
+        }
+
+        // Fill today_time / week_time for the whole page in 2 queries instead of the
+        // accessors' per-user, per-session queries (the N+1 that made this list slow).
+        if ($roleId === 3) {
+            User::preloadWorkedTimes($users);
+        }
+
+        $users = $users
             ->map(function ($user) use ($roleId) {
 
                 if ($roleId === 3) {
@@ -67,6 +142,12 @@ class UserManagementController extends Controller
 
                 return $user;
             });
+
+        if ($wantsPagination) {
+            // Same standard Laravel envelope ({ data, current_page, last_page, total, ... }).
+            $paginator->setCollection($users);
+            return response()->json($paginator);
+        }
 
         return response()->json($users);
     }
@@ -126,8 +207,10 @@ class UserManagementController extends Controller
             'user_role' => $roleId,
             'employee_type' => $request->employee_type ?? '',
             'joining_date' => $request->joining_date,
+            'probation_period_end_date' => $request->probation_period_end_date,
             'subscription_from' => $request->subscription_from ?? null,
-            'internee_manager_id' => $request->internee_manager_id
+            'internee_manager_id' => $request->internee_manager_id,
+            'manager_id' => $request->manager_id
         ]);
 
         return response()->json($user, 201);
@@ -173,8 +256,10 @@ class UserManagementController extends Controller
             'phone' => $request->phone,
             'employee_type' => $request->employee_type,
             'joining_date' => $request->joining_date,
+            'probation_period_end_date' => $request->probation_period_end_date,
             'subscription_from' => $request->subscription_from ?? null,
-            'internee_manager_id' => $request->internee_manager_id
+            'internee_manager_id' => $request->internee_manager_id,
+            'manager_id' => $request->manager_id
         ];
     
         // Update password only if provided

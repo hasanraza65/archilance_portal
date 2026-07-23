@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\admin;
 
 use App\Http\Controllers\Controller;
+use App\Traits\CountsWeekdays;
 use Illuminate\Http\Request;
 use App\Models\LeaveRequest;
 use Illuminate\Support\Facades\Auth;
@@ -13,26 +14,93 @@ use Carbon\CarbonPeriod;
 
 class LeaveRequestController extends Controller
 {
+    use CountsWeekdays;
+
     private const ADDITIONAL_LEAVE_USER_IDS = [177, 109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162];
 
     // List all leave requests (latest first)
-    public function index()
+    public function index(Request $request)
     {
-        // Fetch all leave requests with related user info
-        $leaves = LeaveRequest::with('user')
-            ->orderBy('created_at', 'desc')
-            ->get();
+        // Only the columns the list actually renders — the full user row was being
+        // attached to every leave request.
+        $query = LeaveRequest::with('user:id,name,email,profile_pic,employee_type')
+            ->orderBy('created_at', 'desc');
 
-        // Count totals by status
+        // ── Optional filters (all opt-in; absent = no filtering, so existing
+        //    clients keep getting exactly what they get today) ──────────────
+        if ($request->filled('status')) {
+            $statuses = collect(explode(',', (string) $request->input('status')))
+                ->map(fn($s) => trim($s))
+                ->filter()
+                ->values()
+                ->all();
+            if (!empty($statuses)) {
+                $query->whereIn('status', $statuses);
+            }
+        }
+
+        if ($request->filled('user_id')) {
+            $userIds = collect(explode(',', (string) $request->input('user_id')))
+                ->map(fn($id) => (int) trim($id))
+                ->filter()
+                ->values()
+                ->all();
+            if (!empty($userIds)) {
+                $query->whereIn('user_id', $userIds);
+            }
+        }
+
+        if ($request->filled('leave_type')) {
+            $query->where('leave_type', $request->input('leave_type'));
+        }
+
+        // Overlap-style date filtering: any leave touching the window.
+        if ($request->filled('from')) {
+            $query->whereDate('end_date', '>=', $request->input('from'));
+        }
+        if ($request->filled('to')) {
+            $query->whereDate('start_date', '<=', $request->input('to'));
+        }
+
+        // ── Status counts in ONE grouped query instead of four COUNT(*) scans ──
+        // Counts reflect the SAME filters as the list (minus pagination), so the
+        // summary always matches what is being listed.
+        $grouped = (clone $query)
+            ->getQuery()
+            ->select('status', \DB::raw('COUNT(*) as aggregate'))
+            ->reorder()
+            ->groupBy('status')
+            ->pluck('aggregate', 'status');
+
         $counts = [
-            'total' => LeaveRequest::count(),
-            'approved' => LeaveRequest::where('status', 'Approved')->count(),
-            'rejected' => LeaveRequest::where('status', 'Rejected')->count(),
-            'pending' => LeaveRequest::where('status', 'Pending')->count(),
+            'total'    => (int) $grouped->sum(),
+            'approved' => (int) $grouped->get('Approved', 0),
+            'rejected' => (int) $grouped->get('Rejected', 0),
+            'pending'  => (int) $grouped->get('Pending', 0),
         ];
 
+        // ── Opt-in pagination: only when the client asks (page / per_page). ──
+        // Without those params the response shape is unchanged, so a backend-only
+        // deploy cannot affect the current frontend.
+        if ($request->filled('page') || $request->filled('per_page')) {
+            $perPage = (int) $request->input('per_page', 25);
+            $perPage = max(1, min($perPage, 200));
+
+            $paginator = $query->paginate($perPage);
+
+            return response()->json([
+                'data'         => $paginator->items(),
+                'counts'       => $counts,
+                'current_page' => $paginator->currentPage(),
+                'per_page'     => $paginator->perPage(),
+                'last_page'    => $paginator->lastPage(),
+                'total'        => $paginator->total(),
+                'has_more'     => $paginator->hasMorePages(),
+            ]);
+        }
+
         return response()->json([
-            'data' => $leaves,
+            'data' => $query->get(),
             'counts' => $counts
         ]);
     }
@@ -90,13 +158,7 @@ class LeaveRequestController extends Controller
             $start = Carbon::parse($req->start_date);
             $end   = Carbon::parse($req->end_date);
 
-            $days = 0;
-            while ($start->lte($end)) {
-                if (!in_array($start->dayOfWeek, [CarbonInterface::SATURDAY, CarbonInterface::SUNDAY])) {
-                    $days++;
-                }
-                $start->addDay();
-            }
+            $days = $this->weekdaysBetween($start, $end);
 
             $type = strtolower(trim($req->leave_type));
             switch ($type) {
@@ -127,9 +189,7 @@ class LeaveRequestController extends Controller
                 ->sum(function ($req) {
                     $start = Carbon::parse($req->start_date);
                     $end = Carbon::parse($req->end_date);
-                    return collect(CarbonPeriod::create($start, $end))
-                        ->filter(fn($date) => !$date->isWeekend())
-                        ->count();
+                    return $this->weekdaysBetween($start, $end);
                 });
             $leaveSummary['additional'] = $additionalUsed;
         }
