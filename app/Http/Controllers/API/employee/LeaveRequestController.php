@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\employee;
 
 use App\Http\Controllers\Controller;
+use App\Traits\CountsWeekdays;
 use Illuminate\Http\Request;
 use App\Models\LeaveRequest;
 use App\Models\User;
@@ -13,6 +14,8 @@ use Carbon\CarbonPeriod;
 
 class LeaveRequestController extends Controller
 {
+    use CountsWeekdays;
+
     private const ADDITIONAL_LEAVE_LIMIT = 8;
     private const ADDITIONAL_LEAVE_USER_IDS = [177, 109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162];
 
@@ -60,14 +63,7 @@ class LeaveRequestController extends Controller
 
             $start = Carbon::parse($req->start_date);
             $end = Carbon::parse($req->end_date);
-            $days = 0;
-
-            while ($start->lte($end)) {
-                if (!in_array($start->dayOfWeek, [CarbonInterface::SATURDAY, CarbonInterface::SUNDAY])) {
-                    $days++;
-                }
-                $start->addDay();
-            }
+            $days = $this->weekdaysBetween($start, $end);
 
             $type = strtolower(trim($req->leave_type));
             $mapped = null;
@@ -102,19 +98,22 @@ class LeaveRequestController extends Controller
                 ->sum(function ($leave) {
                     $start = Carbon::parse($leave->start_date);
                     $end = Carbon::parse($leave->end_date);
-                    return collect(CarbonPeriod::create($start, $end))
-                        ->filter(fn($date) => !$date->isWeekend())
-                        ->count();
+                    return $this->weekdaysBetween($start, $end);
                 });
             $typeCounts['additional'] = $additionalUsed;
         }
 
-        // Status counts
+        // Status counts — ONE grouped query instead of four separate COUNT(*) scans.
+        $statusTotals = LeaveRequest::where('user_id', $userId)
+            ->selectRaw('status, COUNT(*) as aggregate')
+            ->groupBy('status')
+            ->pluck('aggregate', 'status');
+
         $counts = [
-            'total' => LeaveRequest::where('user_id', $userId)->count(),
-            'approved' => LeaveRequest::where('user_id', $userId)->where('status', 'Approved')->count(),
-            'rejected' => LeaveRequest::where('user_id', $userId)->where('status', 'Rejected')->count(),
-            'pending' => LeaveRequest::where('user_id', $userId)->where('status', 'Pending')->count(),
+            'total'    => (int) $statusTotals->sum(),
+            'approved' => (int) $statusTotals->get('Approved', 0),
+            'rejected' => (int) $statusTotals->get('Rejected', 0),
+            'pending'  => (int) $statusTotals->get('Pending', 0),
         ];
 
         return response()->json([
@@ -151,9 +150,7 @@ class LeaveRequestController extends Controller
         $endDate = Carbon::parse($request->end_date);
 
         // Calculate number of weekdays (Mon-Fri) applied for
-        $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
-            ->filter(fn($date) => !$date->isWeekend())
-            ->count();
+        $daysRequested = $this->weekdaysBetween($startDate, $endDate);
 
         // Handle additional leave separately (all-time limit, no cycle)
         if ($leaveType === 'additional') {
@@ -164,9 +161,7 @@ class LeaveRequestController extends Controller
                 ->sum(function ($leave) {
                     $start = Carbon::parse($leave->start_date);
                     $end = Carbon::parse($leave->end_date);
-                    return collect(CarbonPeriod::create($start, $end))
-                        ->filter(fn($date) => !$date->isWeekend())
-                        ->count();
+                    return $this->weekdaysBetween($start, $end);
                 });
 
             if (($usedAdditional + $daysRequested) > self::ADDITIONAL_LEAVE_LIMIT) {
@@ -230,9 +225,7 @@ class LeaveRequestController extends Controller
             ->sum(function ($leave) {
                 $start = Carbon::parse($leave->start_date);
                 $end = Carbon::parse($leave->end_date);
-                return collect(CarbonPeriod::create($start, $end))
-                    ->filter(fn($date) => !$date->isWeekend())
-                    ->count();
+                return $this->weekdaysBetween($start, $end);
             });
 
         // Check if limit exceeded
@@ -292,14 +285,7 @@ class LeaveRequestController extends Controller
         foreach ($leaveRequests as $req) {
             $start = Carbon::parse($req->start_date);
             $end = Carbon::parse($req->end_date);
-            $days = 0;
-
-            while ($start->lte($end)) {
-                if (!in_array($start->dayOfWeek, [CarbonInterface::SATURDAY, CarbonInterface::SUNDAY])) {
-                    $days++;
-                }
-                $start->addDay();
-            }
+            $days = $this->weekdaysBetween($start, $end);
 
             $type = strtolower(trim($req->leave_type));
             switch ($type) {
@@ -356,9 +342,7 @@ class LeaveRequestController extends Controller
         $endDate = Carbon::parse($request->end_date);
 
         // Calculate requested weekdays
-        $daysRequested = collect(CarbonPeriod::create($startDate, $endDate))
-            ->filter(fn($date) => !$date->isWeekend())
-            ->count();
+        $daysRequested = $this->weekdaysBetween($startDate, $endDate);
 
         // Handle additional leave separately (all-time limit, no cycle)
         if ($leaveType === 'additional') {
@@ -370,9 +354,7 @@ class LeaveRequestController extends Controller
                 ->sum(function ($l) {
                     $start = Carbon::parse($l->start_date);
                     $end = Carbon::parse($l->end_date);
-                    return collect(CarbonPeriod::create($start, $end))
-                        ->filter(fn($date) => !$date->isWeekend())
-                        ->count();
+                    return $this->weekdaysBetween($start, $end);
                 });
 
             if (($usedAdditional + $daysRequested) > self::ADDITIONAL_LEAVE_LIMIT) {
@@ -435,9 +417,7 @@ class LeaveRequestController extends Controller
             ->sum(function ($l) {
                 $start = Carbon::parse($l->start_date);
                 $end = Carbon::parse($l->end_date);
-                return collect(CarbonPeriod::create($start, $end))
-                    ->filter(fn($date) => !$date->isWeekend())
-                    ->count();
+                return $this->weekdaysBetween($start, $end);
             });
 
         if (($usedLeaves + $daysRequested) > $limits[$leaveType]) {

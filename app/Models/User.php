@@ -111,15 +111,33 @@ class User extends Authenticatable
     }
 
 
-   public function calculateWorkedTime($startDate, $endDate)
+   /**
+    * Worked seconds between two dates.
+    *
+    * $preloadedSessions / $preloadedAdjustments let a caller hand in data it has
+    * already fetched in BULK (see preloadWorkedTimes below), which removes the
+    * per-user / per-session N+1 that made the employee list slow. Both are
+    * optional — when omitted the method queries exactly as before, so every
+    * existing caller is unaffected.
+    *
+    * Passing a SUPERSET of sessions is safe: the per-day $filterDates loop below
+    * only counts the portion of each session that falls inside [$startDate,$endDate],
+    * so sessions outside the range contribute zero.
+    *
+    * @param  \Illuminate\Support\Collection|null  $preloadedSessions      sessions for THIS user
+    * @param  \Illuminate\Support\Collection|null  $preloadedAdjustments   idle rows keyed by session_id
+    */
+   public function calculateWorkedTime($startDate, $endDate, $preloadedSessions = null, $preloadedAdjustments = null)
 {
-    $sessions = WorkSession::where('user_id', $this->id)
-        ->whereDate('start_date', '<=', $endDate)
-        ->where(function ($q) use ($startDate) {
-            $q->whereDate('end_date', '>=', $startDate)
-              ->orWhereNull('end_date');
-        })
-        ->get();
+    $sessions = $preloadedSessions !== null
+        ? $preloadedSessions
+        : WorkSession::where('user_id', $this->id)
+            ->whereDate('start_date', '<=', $endDate)
+            ->where(function ($q) use ($startDate) {
+                $q->whereDate('end_date', '>=', $startDate)
+                  ->orWhereNull('end_date');
+            })
+            ->get();
 
     $totalSeconds = 0;
 
@@ -158,9 +176,11 @@ class User extends Authenticatable
         // never subtracted twice, and each interval is clamped to this session's own window
         // so a stale row can never remove more time than the session actually contains.
         $adjustmentSeconds = 0;
-        $adjustments = \DB::table('session_time_adjustments')
-            ->where('session_id', $session->id)
-            ->get();
+        $adjustments = $preloadedAdjustments !== null
+            ? $preloadedAdjustments->get($session->id, collect())
+            : \DB::table('session_time_adjustments')
+                ->where('session_id', $session->id)
+                ->get();
 
         foreach ($this->mergeIdleIntervals($adjustments) as $mergedInterval) {
             [$mergedStart, $mergedEnd] = $mergedInterval;
@@ -207,11 +227,90 @@ class User extends Authenticatable
     }
 
 
+    /**
+     * Values filled in by preloadWorkedTimes() so the accessors below don't each
+     * run their own queries. A plain property (not an attribute), so it is never
+     * serialized into the API response.
+     */
+    protected $precomputedWorkedTimes = [];
+
+    public function setPrecomputedWorkedTimes(array $values)
+    {
+        $this->precomputedWorkedTimes = $values;
+
+        return $this;
+    }
+
+    /**
+     * Fill today_time / week_time for a whole collection of users using a FIXED
+     * number of queries (2) instead of the accessors' per-user, per-session
+     * queries — the N+1 that made the employee list slow.
+     *
+     * Produces byte-identical values to the accessors (same algorithm, same
+     * formatSeconds output); it only changes HOW the data is fetched.
+     */
+    public static function preloadWorkedTimes($users)
+    {
+        $users = collect($users);
+        if ($users->isEmpty()) {
+            return;
+        }
+
+        $userIds = $users->pluck('id')->filter()->unique()->values()->all();
+        if (empty($userIds)) {
+            return;
+        }
+
+        $today     = now()->toDateString();
+        $weekStart = now()->startOfWeek()->toDateString();
+        $weekEnd   = now()->endOfWeek()->toDateString();
+
+        // Widest window we need (today always falls inside the current week).
+        $rangeStart = min($weekStart, $today);
+        $rangeEnd   = max($weekEnd, $today);
+
+        // QUERY 1 — every session for all these users overlapping the window.
+        $sessions = WorkSession::whereIn('user_id', $userIds)
+            ->whereDate('start_date', '<=', $rangeEnd)
+            ->where(function ($q) use ($rangeStart) {
+                $q->whereDate('end_date', '>=', $rangeStart)
+                    ->orWhereNull('end_date');
+            })
+            ->get();
+
+        // QUERY 2 — every idle row for those sessions, grouped by session.
+        $adjustmentsBySession = $sessions->isEmpty()
+            ? collect()
+            : \DB::table('session_time_adjustments')
+                ->whereIn('session_id', $sessions->pluck('id')->all())
+                ->get()
+                ->groupBy('session_id');
+
+        $sessionsByUser = $sessions->groupBy('user_id');
+
+        foreach ($users as $user) {
+            $userSessions = $sessionsByUser->get($user->id, collect());
+
+            $user->setPrecomputedWorkedTimes([
+                'today_time' => $user->formatSeconds(
+                    $user->calculateWorkedTime($today, $today, $userSessions, $adjustmentsBySession)
+                ),
+                'week_time' => $user->formatSeconds(
+                    $user->calculateWorkedTime($weekStart, $weekEnd, $userSessions, $adjustmentsBySession)
+                ),
+            ]);
+        }
+    }
+
     public function getTodayTimeAttribute()
     {
+        if (array_key_exists('today_time', $this->precomputedWorkedTimes)) {
+            return $this->precomputedWorkedTimes['today_time'];
+        }
+
         $start = now()->toDateString();
         $end = now()->toDateString();
-    
+
         return $this->formatSeconds(
             $this->calculateWorkedTime($start, $end)
         );
@@ -219,6 +318,10 @@ class User extends Authenticatable
     
     public function getWeekTimeAttribute()
     {
+        if (array_key_exists('week_time', $this->precomputedWorkedTimes)) {
+            return $this->precomputedWorkedTimes['week_time'];
+        }
+
         $start = now()->startOfWeek()->toDateString();
         $end = now()->endOfWeek()->toDateString();
         
