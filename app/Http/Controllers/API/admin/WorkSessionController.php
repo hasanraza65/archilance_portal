@@ -8,6 +8,7 @@ use App\Models\Screenshot;
 use App\Models\User;
 use App\Models\WorkSession;
 use App\Models\TrackWindow;
+use App\Traits\BuildsWindowActivity;
 use Auth;
 use Carbon\Carbon;
 use Carbon\CarbonInterval;
@@ -15,6 +16,8 @@ use Illuminate\Support\Facades\DB;
 
 class WorkSessionController extends Controller
 {
+    use BuildsWindowActivity;
+
 
    public function index(Request $request)
     {
@@ -217,7 +220,7 @@ class WorkSessionController extends Controller
         $totalTimeString = "{$totalHours}h {$remainingMinutes}m";
         
          $ids = $sessions->pluck('id')->toArray();
-        $windows_activity = TrackWindow::whereIn('session_id', $ids)->get();
+        $windows_activity = $this->windowsActivity($ids);
         
         return response()->json(
             array_merge(

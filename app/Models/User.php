@@ -53,6 +53,8 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            // { category_key: bool } map of email notification opt-outs.
+            'email_notification_preferences' => 'array',
         ];
     }
 

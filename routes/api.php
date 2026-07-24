@@ -5,6 +5,7 @@ use App\Http\Controllers\API\DashboardController;
 use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\API\AuthController;
+use App\Http\Controllers\API\NotificationPreferenceController;
 use App\Http\Controllers\API\ProfileManagementController;
 use App\Http\Controllers\API\UserRoleController;
 use App\Http\Controllers\API\PermissionController;
@@ -45,6 +46,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/my-notifications', [AuthController::class, 'myNotifications']);
 
     Route::post('/update-notification-read-status', [AuthController::class, 'updateReadStatusNotifications']);
+
+    // Per-user email notification preferences (available to every authenticated user)
+    Route::get('/notification-preferences', [NotificationPreferenceController::class, 'show']);
+    Route::put('/notification-preferences', [NotificationPreferenceController::class, 'update']);
 
     Route::post('/update-profile', [ProfileManagementController::class, 'updateProfile']);
     Route::post('/update-password', [ProfileManagementController::class, 'updatePassword']);
