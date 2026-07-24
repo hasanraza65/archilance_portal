@@ -107,7 +107,8 @@ class DueDateReminders extends Command
                     'items'   => $items,
                     'cta'     => ['text' => 'View my tasks', 'url' => frontendUrl('/members')],
                     'signoff' => 'Tip: keep your task statuses up to date as you make progress.',
-                ]
+                ],
+                'due_reminder'
             );
             $emailsSent++;
         }

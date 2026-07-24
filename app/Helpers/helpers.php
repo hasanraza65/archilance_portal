@@ -68,7 +68,7 @@ function statusChangedNotification($project_id, $status, $type)
                         ['label' => 'Changed by', 'value' => $from_user->name],
                     ],
                     'cta' => ['text' => 'View job', 'url' => frontendUrl('/jobs/' . $project_id)],
-                ]);
+                ], 'status_change');
             }
         }
     }
@@ -99,7 +99,7 @@ function statusChangedNotification($project_id, $status, $type)
                         ['label' => 'Changed by', 'value' => $from_user->name],
                     ],
                     'cta' => ['text' => 'View task', 'url' => frontendUrl('/project/' . $project_id)],
-                ]);
+                ], 'status_change');
             }
         }
     }
@@ -176,19 +176,64 @@ if (!function_exists('frontendUrl')) {
     }
 }
 
+if (!function_exists('userWantsEmail')) {
+    /**
+     * Does this user want EMAIL for the given notification category?
+     *
+     * Opt-out model: a category the user has never set defaults to TRUE (enabled),
+     * so behaviour is unchanged until they turn something off.
+     *
+     * $user may be an Eloquent User or an email string (looked up). An unknown
+     * email string returns TRUE, so we never silently drop mail to a recipient we
+     * simply couldn't resolve.
+     */
+    function userWantsEmail($user, $category)
+    {
+        if (empty($category)) {
+            return true;
+        }
+
+        if (is_string($user)) {
+            $found = User::where('email', $user)->first();
+            if (!$found) {
+                return true; // couldn't resolve -> preserve existing send behaviour
+            }
+            $user = $found;
+        }
+
+        if (!$user) {
+            return false;
+        }
+
+        $prefs = $user->email_notification_preferences ?? null;
+        if (is_string($prefs)) {
+            $prefs = json_decode($prefs, true);
+        }
+        if (!is_array($prefs)) {
+            return true; // nothing set -> default enabled
+        }
+
+        return ($prefs[$category] ?? true) !== false;
+    }
+}
+
 if (!function_exists('sendNotificationEmail')) {
     /**
      * Send a professional notification email to a single user — UNLESS they are
-     * a customer / customer team member (user_role 4 or 5) or have no email.
-     * $data is handed to the mails.notification template. Never throws.
+     * a customer / customer team member (user_role 4 or 5), have no email, or have
+     * opted out of $category. $data is handed to mails.notification. Never throws.
      */
-    function sendNotificationEmail($toUser, $subject, array $data)
+    function sendNotificationEmail($toUser, $subject, array $data, $category = null)
     {
         if (!$toUser || empty($toUser->email)) {
             return;
         }
         // Business rule: never email customers (role 4) or their team members (role 5).
         if (in_array((int) ($toUser->user_role ?? 0), [4, 5], true)) {
+            return;
+        }
+        // Respect the recipient's per-category email preference (opt-out).
+        if ($category && !userWantsEmail($toUser, $category)) {
             return;
         }
 
@@ -236,7 +281,7 @@ if (!function_exists('sendAssignmentEmail')) {
                 'details' => $details,
                 'cta'     => ['text' => 'View job', 'url' => frontendUrl('/jobs/' . $p->id)],
                 'signoff' => 'Jump in whenever you’re ready.',
-            ]);
+            ], 'assignment');
         } elseif ($type === 'task_assigned') {
             $t = ProjectTask::find($refId);
             if (!$t) {
@@ -259,7 +304,7 @@ if (!function_exists('sendAssignmentEmail')) {
                 'details' => $details,
                 'cta'     => ['text' => 'View task', 'url' => frontendUrl('/project/' . $t->id)],
                 'signoff' => 'Jump in whenever you’re ready.',
-            ]);
+            ], 'assignment');
         }
     }
 }
@@ -332,7 +377,7 @@ if (!function_exists('commentAddedNotification')) {
                 'quote'       => $preview,
                 'details'     => $details,
                 'cta'         => ['text' => 'View task', 'url' => frontendUrl('/project/' . $taskId)],
-            ]);
+            ], 'comment');
         }
     }
 }
@@ -374,7 +419,7 @@ if (!function_exists('chatMessageNotification')) {
             'quote'       => $preview,
             'cta'         => ['text' => 'Open chat', 'url' => frontendUrl('/chat')],
             'signoff'     => 'Reply directly inside Archilance.',
-        ]);
+        ], 'chat_message');
     }
 }
 

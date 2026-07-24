@@ -15,10 +15,12 @@ use App\Models\WorkingHour;
 use App\Models\ActivityLog;
 use Illuminate\Support\Facades\Validator;
 use App\Traits\ResolvesClientTime;
+use App\Traits\BuildsWindowActivity;
 
 
 class WorkSessionController extends Controller
 {
+    use BuildsWindowActivity;
     use ResolvesClientTime;
 
 
@@ -213,7 +215,7 @@ class WorkSessionController extends Controller
             $totalTimeString = "{$totalHours}h {$remainingMinutes}m";
 
             $ids = $sessions->pluck('id')->toArray();
-            $windows_activity = TrackWindow::whereIn('session_id', $ids)->get();
+            $windows_activity = $this->windowsActivity($ids);
 
             return response()->json(
                 array_merge(

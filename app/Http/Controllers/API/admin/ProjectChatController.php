@@ -75,6 +75,12 @@ class ProjectChatController extends Controller
             if($assignee->employee_id != Auth::user()->id){
                 
                 $receiver = User::find($assignee->employee_id);
+
+                // Respect the recipient's project-chat email preference
+                // (also skips a missing/deleted user, avoiding a null deref).
+                if (!userWantsEmail($receiver, 'project_message')) {
+                    continue;
+                }
            
                 $receiver_email = $receiver->email;
                 $receiver_name = $receiver->name;
@@ -111,6 +117,12 @@ class ProjectChatController extends Controller
             if($assignee->id != Auth::user()->id){
 
                 $receiver = User::find($assignee->id);
+
+                // Respect the recipient's project-chat email preference
+                // (also skips a missing/deleted user, avoiding a null deref).
+                if (!userWantsEmail($receiver, 'project_message')) {
+                    continue;
+                }
            
                 $receiver_email = $receiver->email;
                 $receiver_name = $receiver->name;
