@@ -10,7 +10,6 @@ use Carbon\Carbon;
 use App\Models\User;
 use App\Models\ProjectTask;
 use App\Models\Project;
-use App\Models\WorkSession;
 use App\Models\InterneeRating;
 
 class InterneeRatingController extends Controller
@@ -69,7 +68,7 @@ class InterneeRatingController extends Controller
 
         $internees = User::where('internee_manager_id', $user->id)
             ->where('employee_type', 'Internee')
-            ->get(['id', 'name', 'email', 'profile_pic', 'internee_manager_id']);
+            ->get(['id', 'name', 'email', 'profile_pic', 'internee_manager_id', 'joining_date']);
 
         return response()->json(['data' => $internees]);
     }
@@ -270,6 +269,25 @@ class InterneeRatingController extends Controller
     {
         $user = Auth::user();
 
+        // Internee grading visibility gate: an internee sees their OWN grading only after a
+        // full month has passed since their FIRST work session. Managers/Executives are never
+        // gated. `eligibility` is additive to the response — older frontends simply ignore it,
+        // so this is safe to deploy backend-first.
+        $eligibility = $this->interneeGradingEligibility($user);
+
+        if ($eligibility && $eligibility['applies'] && !$eligibility['is_eligible']) {
+            // Not eligible yet → return an empty, well-formed page so an internee cannot pull
+            // grading rows early regardless of what the frontend does.
+            $empty = new \Illuminate\Pagination\LengthAwarePaginator([], 0, 20, 1, [
+                'path' => $request->url(),
+                'query' => $request->query(),
+            ]);
+            $payload = $empty->toArray();
+            $payload['eligibility'] = $eligibility;
+
+            return response()->json($payload);
+        }
+
         $query = InterneeRating::with([
             'manager:id,name,email,profile_pic',
             'internee:id,name,email,profile_pic',
@@ -307,7 +325,52 @@ class InterneeRatingController extends Controller
 
         $ratings = $query->orderBy('rating_date', 'desc')->paginate(20);
 
-        return response()->json($ratings);
+        $payload = $ratings->toArray();
+        $payload['eligibility'] = $eligibility; // null for anyone the gate doesn't apply to
+
+        return response()->json($payload);
+    }
+
+    /**
+     * Grading is visible to an internee only after a full month has elapsed since their joining
+     * date. Returns null for anyone who is not an internee (no gate applies to them).
+     *
+     * Shape (when it applies):
+     *   ['applies' => true, 'is_eligible' => bool,
+     *    'joining_date' => 'Y-m-d'|null, 'available_from' => 'Y-m-d'|null]
+     */
+    private function interneeGradingEligibility($user)
+    {
+        if (($user->employee_type ?? null) !== 'Internee') {
+            return null; // gate only applies to internees
+        }
+
+        $joiningDate = null;
+        if ($user->joining_date) {
+            try {
+                $joiningDate = Carbon::parse($user->joining_date)->startOfDay();
+            } catch (\Throwable $e) {
+                $joiningDate = null;
+            }
+        }
+
+        if (!$joiningDate) {
+            return [
+                'applies' => true,
+                'is_eligible' => false,
+                'joining_date' => null,
+                'available_from' => null,
+            ];
+        }
+
+        $availableFrom = $joiningDate->copy()->addMonth();
+
+        return [
+            'applies' => true,
+            'is_eligible' => Carbon::now()->gte($availableFrom),
+            'joining_date' => $joiningDate->toDateString(),
+            'available_from' => $availableFrom->toDateString(),
+        ];
     }
 
     /**
