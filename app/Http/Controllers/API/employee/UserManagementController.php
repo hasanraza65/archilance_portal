@@ -122,6 +122,23 @@ class UserManagementController extends Controller
         // than bypassing the restriction.
         $this->applyEmployeeTypeFilter($query, $request);
 
+        // Optional server-side search across the common identity fields. Opt-in: when the
+        // `search` param is absent the query is untouched, so a backend-only deploy leaves
+        // the current frontend working exactly as before. ANDed after the visibility/type
+        // filters above, so it can only narrow what the user is already allowed to see.
+        if ($request->filled('search')) {
+            $term = trim((string) $request->input('search'));
+            if ($term !== '') {
+                $like = '%' . $term . '%';
+                $query->where(function ($q) use ($like) {
+                    $q->where('name', 'like', $like)
+                        ->orWhere('email', 'like', $like)
+                        ->orWhere('username', 'like', $like)
+                        ->orWhere('phone', 'like', $like);
+                });
+            }
+        }
+
         // OPT-IN pagination: only when the client actually asks for it (page / per_page).
         // Clients that send neither keep receiving the full plain array exactly as before,
         // so the existing frontend is unaffected by a backend-only deploy.
