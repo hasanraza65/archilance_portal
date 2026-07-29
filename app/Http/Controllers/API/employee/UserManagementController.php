@@ -237,7 +237,10 @@ class UserManagementController extends Controller
             'internee_manager_id' => $request->internee_manager_id ?? null,
             'manager_id' => $request->manager_id ?? null,
             'probation_period_end_date' => $request->probation_period_end_date,
-            'subscription_from' => $request->subscription_from ?? null
+            'subscription_from' => $request->subscription_from ?? null,
+            // 1 = "contract already accepted" (login allowed immediately); absent -> 0
+            // (gated, must accept the contract before logging in).
+            'contract_status' => (int) $request->boolean('contract_status'),
         ]);
 
         return response()->json($user, 201);
@@ -295,6 +298,12 @@ class UserManagementController extends Controller
             'probation_period_end_date' => $request->probation_period_end_date,
             'subscription_from' => $request->subscription_from ?? null
         ];
+
+        // Only touch contract_status when the form actually sends it — a normal edit
+        // must never silently re-lock (or unlock) a user.
+        if ($request->has('contract_status')) {
+            $updateData['contract_status'] = (int) $request->boolean('contract_status');
+        }
 
         // Update password only if provided
         if ($request->filled('password')) {

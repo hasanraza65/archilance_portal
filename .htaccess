@@ -1,0 +1,22 @@
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    RewriteRule ^$ public/ [L]
+    RewriteRule (.*) public/$1 [L]
+</IfModule>
+
+# CORS for static image assets (e.g. /storage/uploads/screenshots/*.png). These are
+# served straight off disk (they bypass Laravel and config/cors.php), so the header
+# must be added here at the web-server level. This lets the client-side "Export as PDF"
+# feature (html2canvas) read screenshot pixels into a canvas cross-origin. The images
+# are public, so "*" is safe (no credentials, no sensitive JSON).
+<IfModule mod_headers.c>
+    <FilesMatch "\.(png|jpe?g|gif|webp|bmp|svg|ico)$">
+        # "always" is REQUIRED — plain "Header set" is skipped on 304 Not Modified
+        # responses, which is exactly what a browser gets for an already-cached
+        # screenshot, so the CORS header would be missing on the request that matters.
+        Header always set Access-Control-Allow-Origin "*"
+        Header always set Access-Control-Allow-Methods "GET, OPTIONS"
+        Header always set Cross-Origin-Resource-Policy "cross-origin"
+    </FilesMatch>
+</IfModule>
