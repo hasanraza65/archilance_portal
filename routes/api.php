@@ -20,10 +20,18 @@ use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\SubscriptionController;
 use App\Http\Controllers\API\SlackController;
 use App\Http\Controllers\OneDriveAuthController;
+use App\Http\Controllers\API\ContractTemplateController;
+use App\Http\Controllers\API\ContractController;
+use App\Http\Controllers\API\PublicContractController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
+
+// Public, NO-LOGIN contract view + accept (access is guarded solely by the
+// unguessable token in the link — the recipient never logs in).
+Route::get('/contracts/public/{token}', [PublicContractController::class, 'show']);
+Route::post('/contracts/public/{token}/accept', [PublicContractController::class, 'accept']);
 
 Route::post('/slack/interactions', [SlackController::class, 'handle']);
 
@@ -50,6 +58,19 @@ Route::middleware('auth:sanctum')->group(function () {
     // Per-user email notification preferences (available to every authenticated user)
     Route::get('/notification-preferences', [NotificationPreferenceController::class, 'show']);
     Route::put('/notification-preferences', [NotificationPreferenceController::class, 'update']);
+
+    // Contracts module — fixed paths shared by Admins (role 2) and Executives
+    // (role 3 + employee_type 'Executive'); authorization is enforced inside the
+    // controllers (see AuthorizesContractManagers), not by route middleware.
+    Route::get('/contract-variables', [ContractTemplateController::class, 'variables']);
+    Route::apiResource('contract-templates', ContractTemplateController::class);
+    Route::get('/contracts', [ContractController::class, 'index']);
+    Route::post('/contracts', [ContractController::class, 'store']);
+    Route::get('/contracts/{id}', [ContractController::class, 'show'])->whereNumber('id');
+    Route::match(['put', 'patch'], '/contracts/{id}', [ContractController::class, 'update'])->whereNumber('id');
+    Route::patch('/contracts/{id}/status', [ContractController::class, 'updateStatus'])->whereNumber('id');
+    Route::post('/contracts/{id}/resend', [ContractController::class, 'resend'])->whereNumber('id');
+    Route::delete('/contracts/{id}', [ContractController::class, 'destroy'])->whereNumber('id');
 
     Route::post('/update-profile', [ProfileManagementController::class, 'updateProfile']);
     Route::post('/update-password', [ProfileManagementController::class, 'updatePassword']);

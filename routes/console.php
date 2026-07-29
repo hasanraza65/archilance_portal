@@ -15,3 +15,6 @@ Schedule::call(function () {
 
 // Daily digest of tasks with an approaching / overdue due date (each morning at 8am).
 Schedule::command('notify:due-reminders')->dailyAt('08:00');
+
+// Notify admins & executives when an employee's probation period end date is reached.
+Schedule::command('notify:probation-reminders')->dailyAt('08:05');

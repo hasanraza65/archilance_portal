@@ -23,3 +23,17 @@
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteRule ^ index.php [L]
 </IfModule>
+
+# CORS for static image assets (e.g. /storage/uploads/screenshots/*.png).
+# These files are served directly by the web server (the public/storage symlink),
+# so they bypass Laravel and its config/cors.php entirely. This lets the client-side
+# "Export as PDF" feature (html2canvas) read screenshot pixels into a canvas
+# cross-origin. Images are public, so "*" is safe here (no credentials, no sensitive
+# JSON). Applies to the whole public tree, including the /storage/ subtree.
+<IfModule mod_headers.c>
+    <FilesMatch "\.(png|jpe?g|gif|webp|bmp|svg|ico)$">
+        Header set Access-Control-Allow-Origin "*"
+        Header set Access-Control-Allow-Methods "GET, OPTIONS"
+        Header set Cross-Origin-Resource-Policy "cross-origin"
+    </FilesMatch>
+</IfModule>

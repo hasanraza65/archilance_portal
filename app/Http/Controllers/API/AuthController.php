@@ -37,6 +37,7 @@ class AuthController extends Controller
             'username' => $request->username,
             'phone' => $request->phone,
             'password' => Hash::make($request->password),
+            'contract_status' => 1, // self-registered accounts are not contract-gated
         ]);
 
         $token = $user->createToken('auth_token')->plainTextToken;
@@ -63,6 +64,17 @@ class AuthController extends Controller
 
         if (!$user || !Hash::check($request->password, $user->password)) {
             return response()->json(['message' => 'Invalid credentials'], 401);
+        }
+
+        // Employment-contract gate: a NEW employee (user_role 3) cannot log in until
+        // they have accepted their contract. All existing users were back-filled to 1,
+        // and ONLY role-3 accounts are gated here, so admins, customers and customer
+        // team members (which may default to 0) are never locked out by this.
+        if ((int) ($user->user_role ?? 0) === 3 && (int) ($user->contract_status ?? 0) === 0) {
+            return response()->json([
+                'message' => 'Your employment contract is pending acceptance. Please review and accept the contract sent to your email to activate your account.',
+                'contract_pending' => true,
+            ], 403);
         }
 
         // ✅ Get client IP

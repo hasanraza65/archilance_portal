@@ -55,6 +55,8 @@ class User extends Authenticatable
             'password' => 'hashed',
             // { category_key: bool } map of email notification opt-outs.
             'email_notification_preferences' => 'array',
+            // 0 = employment contract not yet accepted, 1 = accepted (login allowed).
+            'contract_status' => 'integer',
         ];
     }
 
