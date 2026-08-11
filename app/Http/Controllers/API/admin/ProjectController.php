@@ -162,6 +162,20 @@ class ProjectController extends Controller
 
 
 
+    /**
+     * Members View — every employee with their tasks grouped by status.
+     *
+     * OPT-IN slimming params (all absent = byte-identical legacy response, so the
+     * existing frontend is unaffected):
+     *   ?light=1        drop the duplicated flat `assignedTasks` array (every task
+     *                   is already present under tasks_by_status) and return only
+     *                   the user fields the members list actually renders, plus
+     *                   trim each task to the fields the UI reads. This is the big
+     *                   one — the legacy payload serializes every task TWICE and
+     *                   ships full user rows.
+     *   ?statuses=a,b   only include these task statuses.
+     *   ?employee_id=N  only this employee.
+     */
     public function projectsWithMember(Request $request)
     {
         $statusOrder = [
@@ -174,12 +188,23 @@ class ProjectController extends Controller
             'Completed' => 7,
         ];
 
-        $users = User::with([
-            'assignedTasks' => function ($q) {
+        $light = $request->boolean('light');
+
+        $wantedStatuses = collect(explode(',', (string) $request->input('statuses')))
+            ->map(fn($s) => trim($s))
+            ->filter()
+            ->values();
+
+        $query = User::with([
+            'assignedTasks' => function ($q) use ($wantedStatuses) {
                 $q->with([
                     'project',
                     'parentTask',
                 ])->withCount('subTasks')->where('task_status', '!=', 'Todo');
+
+                if ($wantedStatuses->isNotEmpty()) {
+                    $q->whereIn('task_status', $wantedStatuses->all());
+                }
             }
         ])
             ->withCount([
@@ -191,22 +216,46 @@ class ProjectController extends Controller
                     $q->where('task_status', '!=', 'On Hold');
                 }
             ])
-            ->where('user_role', 3)
-            ->get();
+            ->where('user_role', 3);
+
+        if ($request->filled('employee_id')) {
+            $query->where('id', (int) $request->input('employee_id'));
+        }
+
+        // OPT-IN peer visibility. Only applied when the caller explicitly asks
+        // with ?peer_scope=1, so every existing client — the classic React app,
+        // any already-built v2 bundle, the Electron tracker — keeps the exact
+        // response it has today and cannot be affected by deploying this alone.
+        // The response SHAPE is unchanged either way: still a JSON array of
+        // users, just fewer rows when the filter applies.
+        if ($request->boolean('peer_scope')) {
+            $hidden = $this->peerHiddenUserIds();
+            if (!empty($hidden)) {
+                $query->whereNotIn('id', $hidden);
+            }
+        }
+
+        $users = $query->get();
+
+        // Only the statuses the client asked for still get a bucket; with no
+        // filter every status appears (even empty) exactly as before.
+        $bucketStatuses = $wantedStatuses->isNotEmpty()
+            ? collect($statusOrder)->only($wantedStatuses->all())
+            : collect($statusOrder);
 
         // Transform: group tasks by status & count them
-        $users = $users->map(function ($user) use ($statusOrder) {
+        $users = $users->map(function ($user) use ($bucketStatuses, $light) {
             $grouped = $user->assignedTasks
                 ->groupBy('task_status')
-                ->map(function ($tasks, $status) {
+                ->map(function ($tasks, $status) use ($light) {
                     return [
                         'count' => $tasks->count(),
-                        'tasks' => $tasks,
+                        'tasks' => $light ? $tasks->map(fn($t) => $this->slimTask($t))->values() : $tasks,
                     ];
                 });
 
             // Ensure all statuses appear, even if count = 0
-            $ordered = collect($statusOrder)->mapWithKeys(function ($order, $status) use ($grouped) {
+            $ordered = $bucketStatuses->mapWithKeys(function ($order, $status) use ($grouped) {
                 return [
                     $status => $grouped->get($status, [
                         'count' => 0,
@@ -215,12 +264,90 @@ class ProjectController extends Controller
                 ];
             });
 
-            $user->tasks_by_status = $ordered;
+            if (!$light) {
+                $user->tasks_by_status = $ordered;
+                return $user;
+            }
 
-            return $user;
+            // Slim mode: return ONLY what the members list renders.
+            return [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'profile_pic' => $user->profile_pic,
+                'employee_type' => $user->employee_type,
+                'total_tasks' => $user->total_tasks,
+                'tasks_by_status' => $ordered,
+            ];
         });
 
         return response()->json($users);
+    }
+
+    /**
+     * Users a MANAGER or SUPERVISOR must not see, mirroring the rule already
+     * enforced for leave requests (LeaveRequestController::managerHiddenUserIds).
+     *
+     *   admin / executive  -> see everyone (empty list)
+     *   manager, supervisor-> cannot see other managers, supervisors or
+     *                         executives, but always see themselves
+     *   anyone else        -> only themselves
+     *
+     * Kept in step with the frontend's capabilitiesFor(); if one changes the
+     * other must too, or the assistant and the API will disagree.
+     */
+    private function peerHiddenUserIds(): array
+    {
+        $viewer = \Auth::user();
+        if (!$viewer) {
+            return [];
+        }
+
+        $isAdminOrExecutive = (int) $viewer->user_role === 2
+            || (int) $viewer->user_role === 7
+            || strcasecmp((string) $viewer->employee_type, 'Executive') === 0;
+
+        if ($isAdminOrExecutive) {
+            return [];
+        }
+
+        $type = strtolower((string) $viewer->employee_type);
+
+        if ($type === 'manager' || $type === 'supervisor') {
+            return User::where(function ($q) {
+                    $q->whereRaw('LOWER(employee_type) IN (?, ?, ?)', ['manager', 'supervisor', 'executive'])
+                        ->orWhere('user_role', 7);
+                })
+                ->where('id', '!=', $viewer->id)
+                ->pluck('id')
+                ->all();
+        }
+
+        // Everyone else sees only their own row.
+        return User::where('id', '!=', $viewer->id)->pluck('id')->all();
+    }
+
+    /** The task fields the Members View actually reads — nothing else. */
+    private function slimTask($task)
+    {
+        return [
+            'id' => $task->id,
+            'task_title' => $task->task_title,
+            'task_status' => $task->task_status,
+            'priority' => $task->priority,
+            'due_date' => $task->due_date,
+            'project_id' => $task->project_id,
+            'parent_task_id' => $task->parent_task_id,
+            'sub_tasks_count' => $task->sub_tasks_count,
+            'project' => $task->project ? [
+                'id' => $task->project->id,
+                'project_name' => $task->project->project_name,
+            ] : null,
+            'parent_task' => $task->parentTask ? [
+                'id' => $task->parentTask->id,
+                'task_title' => $task->parentTask->task_title,
+            ] : null,
+        ];
     }
 
 

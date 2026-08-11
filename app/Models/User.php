@@ -96,6 +96,12 @@ class User extends Authenticatable
         return $this->belongsTo(User::class, 'internee_manager_id');
     }
 
+    /** The REPORTING manager (users.manager_id) — not the internee manager. */
+    public function manager()
+    {
+        return $this->belongsTo(User::class, 'manager_id');
+    }
+
     // Interns managed by this user
     public function internees()
     {

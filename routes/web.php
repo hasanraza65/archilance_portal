@@ -75,6 +75,16 @@ Route::get('/onedrive-image', function (Request $request) {
 
 
 
+Route::get('/server-time', function () {
+    return response()->json([
+        'app_timezone' => config('app.timezone'),
+        'server_time' => now()->toDateTimeString(),
+        'utc_time' => now()->utc()->toDateTimeString(),
+    ]);
+});
+
+
+
 Route::get('/run-scheduler', function () {
     // Run the scheduler
     Artisan::call('schedule:run');

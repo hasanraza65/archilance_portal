@@ -85,14 +85,31 @@ class TaskAssigneeController extends Controller
 
     public function bulkAssign(Request $request)
     {
+        // `nullable` on both rules, matching the ADMIN controller for this same
+        // route. Clients clear ALL assignees by sending a single empty
+        // employee_ids[] entry (v1 convention); Laravel's global middleware
+        // turns "" into null, and without `nullable` that null failed `exists`
+        // with "The selected employee_ids.0 is invalid." — so a role-3 user
+        // could never unassign the last person from a task.
         $request->validate([
             'task_id'        => 'required|exists:project_tasks,id',
-            'employee_ids'   => 'required|array',
-            'employee_ids.*' => 'exists:users,id',
+            'employee_ids'   => 'nullable|array',
+            'employee_ids.*' => 'nullable|exists:users,id',
         ]);
 
         $taskId      = $request->task_id;
-        $employeeIds = $request->employee_ids;
+        $employeeIds = array_filter($request->employee_ids ?? []); // drop null/empty sentinels
+
+        if (empty($employeeIds)) {
+            // Empty list = remove everyone, same as the admin controller.
+            TaskAssignee::where('task_id', $taskId)->delete();
+
+            return response()->json([
+                'message'  => 'All assignees removed.',
+                'assigned' => [],
+                'skipped'  => [],
+            ]);
+        }
 
         // Remove assignees no longer in the list
         TaskAssignee::where('task_id', $taskId)

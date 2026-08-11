@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Traits\CountsWeekdays;
 use Illuminate\Http\Request;
 use App\Models\LeaveRequest;
+use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
@@ -16,15 +17,110 @@ class LeaveRequestController extends Controller
 {
     use CountsWeekdays;
 
-    private const ADDITIONAL_LEAVE_USER_IDS = [177, 109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162];
+    // NOTE: user 177 was intentionally removed — they no longer get additional leaves.
+    private const ADDITIONAL_LEAVE_USER_IDS = [109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162, 166];
+
+    // ── Visibility rules ────────────────────────────────────────────────────
+    // This controller backs /admin/leave-request, /supervisor/leave-request AND
+    // /employee/other-leave-request, so the rules live here rather than in route
+    // middleware. None of it affects an employee's own "My Leaves" page, which
+    // is served by API\employee\LeaveRequestController.
+
+    /** True for admins (user_role 2) and executives (user_role 7 or employee_type Executive). */
+    private function viewerIsAdminOrExecutive(): bool
+    {
+        $viewer = Auth::user();
+        if (!$viewer) {
+            return false;
+        }
+
+        return (int) $viewer->user_role === 2
+            || (int) $viewer->user_role === 7
+            || strcasecmp((string) $viewer->employee_type, 'Executive') === 0;
+    }
+
+    /** Only admins and executives may see who reviewed a request, and when. */
+    private function canSeeReviewer(): bool
+    {
+        return $this->viewerIsAdminOrExecutive();
+    }
+
+    /**
+     * Employees a manager is not allowed to see leave requests for: other
+     * managers and executives. Their own request is never hidden from them.
+     *
+     * Returns an empty list for anyone who isn't a plain manager (admins and
+     * executives are unrestricted; supervisors and employees are unaffected).
+     */
+    /**
+     * REPORTING-LINE VISIBILITY.
+     *
+     * Admins and executives see every request. Everyone else who can open this
+     * screen (managers, supervisors) sees ONLY their direct reports — users
+     * whose users.manager_id points at them. This is the reporting line, never
+     * internee_manager_id.
+     *
+     * This deliberately REPLACES the old rule (all requests minus manager/
+     * executive peers): a manager now receives and actions exactly their own
+     * team's leave, nothing else.
+     */
+    private function applyPeerVisibility($query): void
+    {
+        if ($this->viewerIsAdminOrExecutive()) {
+            return;
+        }
+
+        $viewerId = (int) Auth::id();
+        $query->whereHas('user', function ($q) use ($viewerId) {
+            $q->where('manager_id', $viewerId);
+        });
+    }
+
+    /** 404 on by-id access outside the viewer's reporting line — same as a
+     *  request that does not exist, so nothing about it leaks. */
+    private function assertVisible(LeaveRequest $leave): void
+    {
+        if ($this->viewerIsAdminOrExecutive()) {
+            return;
+        }
+
+        $ownerManagerId = User::where('id', $leave->user_id)->value('manager_id');
+        if ((int) $ownerManagerId !== (int) Auth::id()) {
+            abort(404);
+        }
+    }
+
+    private function hideReviewerFields($models): void
+    {
+        if ($this->canSeeReviewer()) {
+            return;
+        }
+
+        foreach ($models as $model) {
+            $model->makeHidden(['approved_by', 'reviewed_at']);
+        }
+    }
 
     // List all leave requests (latest first)
     public function index(Request $request)
     {
         // Only the columns the list actually renders — the full user row was being
         // attached to every leave request.
-        $query = LeaveRequest::with('user:id,name,email,profile_pic,employee_type')
+        $query = LeaveRequest::with('user:id,name,email,profile_pic,employee_type,manager_id')
             ->orderBy('created_at', 'desc');
+
+        // Attach the reviewer AND the employee's reporting manager only for
+        // those allowed to see them, so the names never reach the wire for
+        // anyone else. The manager is what tells an admin/executive who a
+        // still-pending request is actually waiting on.
+        if ($this->canSeeReviewer()) {
+            $query->with([
+                'approver:id,name,email,profile_pic,employee_type',
+                'user.manager:id,name,email,profile_pic,employee_type',
+            ]);
+        }
+
+        $this->applyPeerVisibility($query);
 
         // ── Optional filters (all opt-in; absent = no filtering, so existing
         //    clients keep getting exactly what they get today) ──────────────
@@ -52,6 +148,21 @@ class LeaveRequestController extends Controller
 
         if ($request->filled('leave_type')) {
             $query->where('leave_type', $request->input('leave_type'));
+        }
+
+        // Free-text employee search. Runs on the server so it matches across ALL
+        // pages — the old client-side filter only ever saw the current page.
+        if ($request->filled('search')) {
+            $term = trim((string) $request->input('search'));
+            if ($term !== '') {
+                $like = '%' . $term . '%';
+                $query->whereHas('user', function ($q) use ($like) {
+                    $q->where('name', 'like', $like)
+                        ->orWhere('email', 'like', $like)
+                        ->orWhere('username', 'like', $like)
+                        ->orWhere('phone', 'like', $like);
+                });
+            }
         }
 
         // Overlap-style date filtering: any leave touching the window.
@@ -87,6 +198,7 @@ class LeaveRequestController extends Controller
             $perPage = max(1, min($perPage, 200));
 
             $paginator = $query->paginate($perPage);
+            $this->hideReviewerFields($paginator->items());
 
             return response()->json([
                 'data'         => $paginator->items(),
@@ -99,8 +211,11 @@ class LeaveRequestController extends Controller
             ]);
         }
 
+        $all = $query->get();
+        $this->hideReviewerFields($all);
+
         return response()->json([
-            'data' => $query->get(),
+            'data' => $all,
             'counts' => $counts
         ]);
     }
@@ -109,6 +224,20 @@ class LeaveRequestController extends Controller
     public function show($id)
     {
         $leave = LeaveRequest::with('user')->findOrFail($id);
+
+        // index() already filters these out of the list, but the detail endpoint
+        // is reachable by id — so re-check here.
+        $this->assertVisible($leave);
+
+        if ($this->canSeeReviewer()) {
+            $leave->load([
+                'approver:id,name,email,profile_pic,employee_type',
+                'user.manager:id,name,email,profile_pic,employee_type',
+            ]);
+        } else {
+            $leave->makeHidden(['approved_by', 'reviewed_at']);
+        }
+
         $user = $leave->user;
         $userId = $user->id;
 
@@ -180,11 +309,13 @@ class LeaveRequestController extends Controller
             $leaveSummary[$mapped] += $days;
         }
 
-        // Add additional leave count for eligible users (all-time, no cycle)
+        // Additional leaves renew with the same anniversary cycle as every
+        // other type (they used to be counted all-time).
         if (in_array($userId, self::ADDITIONAL_LEAVE_USER_IDS)) {
             $additionalUsed = LeaveRequest::where('user_id', $userId)
                 ->where('leave_type', 'additional')
                 ->where('status', '!=', 'Rejected')
+                ->whereBetween('start_date', [$cycleStart, $cycleEnd])
                 ->get()
                 ->sum(function ($req) {
                     $start = Carbon::parse($req->start_date);
@@ -212,6 +343,8 @@ class LeaveRequestController extends Controller
     {
         $leave = LeaveRequest::findOrFail($id);
 
+        $this->assertVisible($leave);
+
         $request->validate([
             'status' => 'required|in:Approved,Rejected',
         ]);
@@ -222,6 +355,12 @@ class LeaveRequestController extends Controller
             'approved_by' => Auth::id(),
         ]);
 
+        if ($this->canSeeReviewer()) {
+            $leave->load('approver:id,name,email,profile_pic,employee_type');
+        } else {
+            $leave->makeHidden(['approved_by', 'reviewed_at']);
+        }
+
         return response()->json(['message' => 'Leave request ' . strtolower($request->status) . '.', 'data' => $leave]);
     }
 
@@ -229,6 +368,9 @@ class LeaveRequestController extends Controller
     public function destroy($id)
     {
         $leave = LeaveRequest::findOrFail($id);
+
+        $this->assertVisible($leave);
+
         $leave->delete();
 
         return response()->json(['message' => 'Leave request deleted.']);

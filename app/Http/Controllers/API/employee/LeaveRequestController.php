@@ -17,7 +17,32 @@ class LeaveRequestController extends Controller
     use CountsWeekdays;
 
     private const ADDITIONAL_LEAVE_LIMIT = 8;
-    private const ADDITIONAL_LEAVE_USER_IDS = [177, 109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162];
+    // NOTE: user 177 was intentionally removed — they no longer get additional leaves.
+    private const ADDITIONAL_LEAVE_USER_IDS = [109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162, 166];
+
+    /**
+     * The leave cycle containing $reference: joining-date anniversary to
+     * anniversary-minus-one-day, or the July-June fallback when no joining
+     * date is set. Identical to the formula the sick/casual/annual caps use.
+     */
+    private function leaveCycleFor($user, Carbon $reference): array
+    {
+        if ($user->joining_date) {
+            $join = Carbon::parse($user->joining_date);
+            $yearDiff = $reference->year - $join->year;
+            $start = $join->copy()->addYears($yearDiff)->startOfDay();
+            if ($start->gt($reference)) {
+                $start->subYear();
+            }
+            $end = $start->copy()->addYear()->subDay()->endOfDay();
+        } else {
+            $year = $reference->month >= 7 ? $reference->year : $reference->year - 1;
+            $start = Carbon::create($year, 7, 1)->startOfDay();
+            $end = Carbon::create($year + 1, 6, 30)->endOfDay();
+        }
+
+        return [$start, $end];
+    }
 
     // List all leave requests of the logged-in employee
     public function index()
@@ -89,11 +114,13 @@ class LeaveRequestController extends Controller
             }
         }
 
-        // Add additional leave count for eligible users (all-time, no cycle)
+        // Additional leaves renew with the same anniversary cycle as every
+        // other type (they used to be counted all-time).
         if (in_array($userId, self::ADDITIONAL_LEAVE_USER_IDS)) {
             $additionalUsed = LeaveRequest::where('user_id', $userId)
                 ->where('leave_type', 'additional')
                 ->where('status', '!=', 'Rejected')
+                ->whereBetween('start_date', [$cycleStart, $cycleEnd])
                 ->get()
                 ->sum(function ($leave) {
                     $start = Carbon::parse($leave->start_date);
@@ -152,11 +179,16 @@ class LeaveRequestController extends Controller
         // Calculate number of weekdays (Mon-Fri) applied for
         $daysRequested = $this->weekdaysBetween($startDate, $endDate);
 
-        // Handle additional leave separately (all-time limit, no cycle)
+        // Additional leaves renew on the joining-date anniversary like every
+        // other type. Usage counts within the cycle CONTAINING the requested
+        // start date, so a leave booked past the anniversary draws on the new
+        // year's pool - same rule as the sick/casual/annual caps below.
         if ($leaveType === 'additional') {
+            [$cycleStart, $cycleEnd] = $this->leaveCycleFor($user, $startDate);
             $usedAdditional = LeaveRequest::where('user_id', $userId)
                 ->where('leave_type', 'additional')
                 ->where('status', '!=', 'Rejected')
+                ->whereBetween('start_date', [$cycleStart, $cycleEnd])
                 ->get()
                 ->sum(function ($leave) {
                     $start = Carbon::parse($leave->start_date);
@@ -166,7 +198,7 @@ class LeaveRequestController extends Controller
 
             if (($usedAdditional + $daysRequested) > self::ADDITIONAL_LEAVE_LIMIT) {
                 return response()->json([
-                    'message' => "You have exceeded your additional leave limit. Used: {$usedAdditional}, Remaining: " . max(0, self::ADDITIONAL_LEAVE_LIMIT - $usedAdditional) . "."
+                    'message' => "You have exceeded your additional leave limit for this leave year. Used: {$usedAdditional}, Remaining: " . max(0, self::ADDITIONAL_LEAVE_LIMIT - $usedAdditional) . "."
                 ], 422);
             }
 
@@ -344,12 +376,17 @@ class LeaveRequestController extends Controller
         // Calculate requested weekdays
         $daysRequested = $this->weekdaysBetween($startDate, $endDate);
 
-        // Handle additional leave separately (all-time limit, no cycle)
+        // Additional leaves renew on the joining-date anniversary like every
+        // other type. Usage counts within the cycle CONTAINING the requested
+        // start date, so a leave booked past the anniversary draws on the new
+        // year's pool - same rule as the sick/casual/annual caps below.
         if ($leaveType === 'additional') {
+            [$cycleStart, $cycleEnd] = $this->leaveCycleFor($user, $startDate);
             $usedAdditional = LeaveRequest::where('user_id', $userId)
                 ->where('leave_type', 'additional')
                 ->where('status', '!=', 'Rejected')
                 ->where('id', '!=', $leave->id)
+                ->whereBetween('start_date', [$cycleStart, $cycleEnd])
                 ->get()
                 ->sum(function ($l) {
                     $start = Carbon::parse($l->start_date);
@@ -359,7 +396,7 @@ class LeaveRequestController extends Controller
 
             if (($usedAdditional + $daysRequested) > self::ADDITIONAL_LEAVE_LIMIT) {
                 return response()->json([
-                    'message' => "You have exceeded your additional leave limit. Used: {$usedAdditional}, Remaining: " . max(0, self::ADDITIONAL_LEAVE_LIMIT - $usedAdditional) . "."
+                    'message' => "You have exceeded your additional leave limit for this leave year. Used: {$usedAdditional}, Remaining: " . max(0, self::ADDITIONAL_LEAVE_LIMIT - $usedAdditional) . "."
                 ], 422);
             }
 
@@ -468,12 +505,42 @@ class LeaveRequestController extends Controller
             'HR@archilance.net'
         ];
 
-        $all_managers = User::where('employee_type', 'Manager')
-            ->orWhere('employee_type', 'Executive')
-            ->pluck('email')
-            ->toArray();
+        $sender = Auth::user();
+        $senderIsExecutive = (int) $sender->user_role === 7
+            || strcasecmp((string) $sender->employee_type, 'Executive') === 0;
 
-        $allEmails = array_unique(array_merge($fixedEmails, $all_managers));
+        // Admins always hear about every request. Executives hear about
+        // everyone's request EXCEPT a fellow executive's own — when an
+        // executive applies, it goes UP to admins only, not sideways to peers.
+        $audience = User::where('user_role', 2)->pluck('email')->all();
+        if (!$senderIsExecutive) {
+            $execEmails = User::where('user_role', 7)
+                ->orWhere('employee_type', 'Executive')
+                ->pluck('email')
+                ->all();
+            $audience = array_merge($audience, $execEmails);
+        }
+
+        // ...plus ONLY the requester's direct manager (users.manager_id — the
+        // reporting line, never internee_manager_id). Managers no longer
+        // receive every employee's requests, just their own team's. For an
+        // executive with no manager set, this leaves admins alone — as intended.
+        if ($sender->manager_id) {
+            $managerEmail = User::where('id', $sender->manager_id)->value('email');
+            if ($managerEmail) {
+                $audience[] = $managerEmail;
+            }
+        }
+
+        // Case-insensitive dedupe: a manager-level requester's manager is often
+        // an executive who is ALREADY in the audience — one email per person,
+        // never two. Employees with no manager fall back to admins/execs alone.
+        $allEmails = collect($fixedEmails)
+            ->merge($audience)
+            ->filter()
+            ->unique(fn ($e) => strtolower(trim($e)))
+            ->values()
+            ->all();
 
         $subject = $isUpdate
             ? $sender_name . ' updated leave request - Archilance LLC'

@@ -27,6 +27,15 @@ class ProjectTaskController extends Controller
 
         $tasks = $query->whereNull('parent_task_id')->get();
 
+        // Attach each task's own logged hours (this task's sessions only, not
+        // its children's) so the customer portal can show a duration next to
+        // every row without a second round-trip per task.
+        foreach ($tasks as $task) {
+            $seconds = $this->calculateTaskTotalHours($task->id);
+            $task->total_hours = $seconds;
+            $task->total_hours_formatted = $this->formatHours($seconds);
+        }
+
         return response()->json($tasks);
     }
 
@@ -65,10 +74,67 @@ class ProjectTaskController extends Controller
     
         // Add the calculated hours to the task response
         $task->assignees_with_hours = $assigneesWithHours;
-        
+
+        // This task's own hours, plus each of its subtasks' own hours — lets
+        // the customer portal show a duration on every row when a parent task
+        // is expanded, computed here so no extra request is needed per row.
+        $ownSeconds = $this->calculateTaskTotalHours($task->id);
+        $task->total_hours = $ownSeconds;
+        $task->total_hours_formatted = $this->formatHours($ownSeconds);
+
+        foreach ($task->subTasks as $subTask) {
+            $subSeconds = $this->calculateTaskTotalHours($subTask->id);
+            $subTask->total_hours = $subSeconds;
+            $subTask->total_hours_formatted = $this->formatHours($subSeconds);
+        }
+
         return response()->json($task);
     }
 
+
+    /**
+     * Total logged hours for ONE task across every assignee (not scoped to a
+     * single employee), used for the per-row duration pills the customer
+     * portal shows on tasks and subtasks. Same net-of-idle math as
+     * calculateEmployeeTaskHours below, just without the user_id filter.
+     */
+    private function calculateTaskTotalHours($taskId)
+    {
+        $sessions = WorkSession::where('task_id', $taskId)->get();
+        $totalSeconds = 0;
+
+        foreach ($sessions as $session) {
+            try {
+                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+
+                if (is_null($session->end_time)) {
+                    $sessionEnd = now();
+                } else {
+                    $endDate = $session->end_date ?? $session->start_date;
+                    $sessionEnd = Carbon::parse($endDate . ' ' . $session->end_time);
+                }
+
+                $sessionDuration = $sessionEnd->diffInSeconds($sessionStart);
+                if ($sessionDuration < 0) {
+                    $sessionDuration = $sessionStart->diffInSeconds($sessionEnd);
+                }
+
+                $adjustments = DB::table('session_time_adjustments')
+                    ->where('session_id', $session->id)
+                    ->get();
+                $adjustmentSeconds = $this->sessionIdleSeconds($adjustments, $sessionStart, $sessionEnd);
+
+                $netSeconds = $sessionDuration - $adjustmentSeconds;
+                if ($netSeconds > 0) {
+                    $totalSeconds += $netSeconds;
+                }
+            } catch (\Exception $e) {
+                continue;
+            }
+        }
+
+        return $totalSeconds;
+    }
 
      private function calculateEmployeeTaskHours($employeeId, $taskId)
     {
