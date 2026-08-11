@@ -234,6 +234,7 @@ class UserManagementController extends Controller
             'password' => bcrypt($request->password),
             'user_role' => $roleId,
             'employee_type' => $request->employee_type ?? '',
+            'employee_team' => $request->input('employee_team') ?: null,
             'internee_manager_id' => $request->internee_manager_id ?? null,
             'manager_id' => $request->manager_id ?? null,
             'probation_period_end_date' => $request->probation_period_end_date,
@@ -298,6 +299,12 @@ class UserManagementController extends Controller
             'probation_period_end_date' => $request->probation_period_end_date,
             'subscription_from' => $request->subscription_from ?? null
         ];
+
+        // employee_team only when the form actually sends it — clients that
+        // predate the field must never wipe a saved team on an ordinary edit.
+        if ($request->has('employee_team')) {
+            $updateData['employee_team'] = $request->input('employee_team') ?: null;
+        }
 
         // Only touch contract_status when the form actually sends it — a normal edit
         // must never silently re-lock (or unlock) a user.

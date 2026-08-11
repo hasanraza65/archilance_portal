@@ -23,6 +23,54 @@ use App\Http\Controllers\OneDriveAuthController;
 use App\Http\Controllers\API\ContractTemplateController;
 use App\Http\Controllers\API\ContractController;
 use App\Http\Controllers\API\PublicContractController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Artisan;
+
+/*
+|--------------------------------------------------------------------------
+| Manual cron trigger (for servers without shell/artisan access)
+|--------------------------------------------------------------------------
+| Lets a scheduled job be run on demand from a browser instead of the CLI.
+| Guarded by CRON_TRIGGER_TOKEN in .env — if that variable is missing or
+| empty the route 404s, so it stays completely closed until you opt in.
+| Only an explicit allow-list of commands can be run.
+*/
+Route::get('/run-task/{job}', function (Request $request, string $job) {
+    $expected = (string) env('CRON_TRIGGER_TOKEN', '');
+    $given = (string) $request->query('token', '');
+
+    if ($expected === '' || !hash_equals($expected, $given)) {
+        abort(404);
+    }
+
+    $allowed = [
+        'internee-grading' => 'internee:auto-zero-grading',
+        'probation-reminders' => 'notify:probation-reminders',
+        'due-reminders' => 'notify:due-reminders',
+    ];
+
+    if (!isset($allowed[$job])) {
+        return response()->json(['ok' => false, 'message' => 'Unknown job.'], 404);
+    }
+
+    $params = [];
+    if ($request->boolean('dry_run')) {
+        $params['--dry-run'] = true;
+    }
+    if ($request->filled('internee')) {
+        $params['--internee'] = (int) $request->query('internee');
+    }
+
+    @set_time_limit(300);
+    $exit = Artisan::call($allowed[$job], $params);
+
+    return response()->json([
+        'ok' => $exit === 0,
+        'job' => $allowed[$job],
+        'dry_run' => $request->boolean('dry_run'),
+        'output' => trim(Artisan::output()),
+    ]);
+});
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [AuthController::class, 'register']);

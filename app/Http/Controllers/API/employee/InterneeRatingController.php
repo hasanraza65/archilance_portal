@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Models\ProjectTask;
 use App\Models\Project;
 use App\Models\InterneeRating;
+use App\Models\WorkSession;
 
 class InterneeRatingController extends Controller
 {
