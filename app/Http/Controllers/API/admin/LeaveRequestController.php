@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\API\admin;
 
 use App\Http\Controllers\Controller;
+use App\Services\LeavePolicy;
 use App\Traits\CountsWeekdays;
 use Illuminate\Http\Request;
 use App\Models\LeaveRequest;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use Carbon\CarbonPeriod;
@@ -17,8 +19,17 @@ class LeaveRequestController extends Controller
 {
     use CountsWeekdays;
 
-    // NOTE: user 177 was intentionally removed — they no longer get additional leaves.
+    /**
+     * Pre-policy allow-list, kept ONLY so the legacy `leave_summary.additional`
+     * tally in show() keeps rendering for the same people it always has,
+     * unaffected by whatever LeavePolicy currently resolves users.employee_team
+     * to. Additional is a real, independent leave type under the current
+     * policy — see LeavePolicy::ADDITIONAL (BIM Team only, its own 8-day pool).
+     */
     private const ADDITIONAL_LEAVE_USER_IDS = [109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162, 166];
+
+    /** Types accepted on the wire. */
+    private const ACCEPTED_TYPES = 'sick,casual,annual,marriage,unpaid,additional';
 
     // ── Visibility rules ────────────────────────────────────────────────────
     // This controller backs /admin/leave-request, /supervisor/leave-request AND
@@ -331,12 +342,112 @@ class LeaveRequestController extends Controller
             'cycle' => [
                 'start' => $cycleStart->toDateString(),
                 'end'   => $cycleEnd->toDateString(),
-            ]
+            ],
+            // Additive: this employee's balances under the current policy.
+            // Older clients ignore it and keep reading `leave_summary`.
+            'policy' => $user ? LeavePolicy::for($user)->summary() : null,
         ]);
     }
 
+    /**
+     * Record leave on an employee's behalf — the management exception route.
+     *
+     * The policy hard-blocks employees in some cases (Annual Leave with under a
+     * week's notice, probation, the casual gap rule). The policy documents allow
+     * management to approve those case by case, so this is where that happens.
+     *
+     * Flow: post without `override` first. A policy breach comes back as 422
+     * with `can_override: true` and the exact reason, which the UI shows before
+     * the manager re-posts with `override: true` and a justification.
+     *
+     * Only admins and executives may override; managers may file on behalf of
+     * their own reports as long as the request is policy-compliant.
+     */
+    public function store(Request $request)
+    {
+        $request->validate([
+            'user_id'         => 'required|integer|exists:users,id',
+            'leave_type'      => 'required|in:' . self::ACCEPTED_TYPES,
+            'reason'          => 'nullable|string',
+            'start_date'      => 'required|date',
+            'end_date'        => 'required|date|after_or_equal:start_date',
+            'status'          => 'nullable|in:Pending,Approved,Rejected',
+            'override'        => 'sometimes|boolean',
+            'override_reason' => 'nullable|string|max:500',
+        ]);
 
+        $employee = User::findOrFail($request->user_id);
 
+        // Same reporting-line rule the rest of this controller enforces.
+        if (!$this->viewerIsAdminOrExecutive()
+            && (int) $employee->manager_id !== (int) Auth::id()) {
+            return response()->json([
+                'message' => 'You can only record leave for employees who report to you.',
+            ], 403);
+        }
+
+        $submitted = strtolower(trim($request->leave_type));
+        $type      = LeavePolicy::normalizeType($submitted);
+        $startDate = Carbon::parse($request->start_date)->startOfDay();
+        $endDate   = Carbon::parse($request->end_date)->startOfDay();
+
+        $override  = $request->boolean('override');
+        $violation = LeavePolicy::for($employee)->validate($type, $startDate, $endDate);
+
+        if ($violation && !$override) {
+            return response()->json([
+                'message'          => $violation,
+                'policy_violation' => $violation,
+                'can_override'     => $this->viewerIsAdminOrExecutive(),
+            ], 422);
+        }
+
+        if ($violation && !$this->viewerIsAdminOrExecutive()) {
+            return response()->json([
+                'message' => 'Only an admin or executive can record leave that falls outside the policy.',
+            ], 403);
+        }
+
+        $status = $request->input('status', 'Pending');
+
+        $payload = [
+            'user_id'    => $employee->id,
+            'leave_type' => $submitted,
+            'reason'     => $request->reason,
+            'start_date' => $startDate,
+            'end_date'   => $endDate,
+            'status'     => $status,
+        ];
+
+        if ($status !== 'Pending') {
+            $payload['reviewed_at'] = now();
+            $payload['approved_by'] = Auth::id();
+        }
+
+        // Audit columns are written only when they exist, so this controller is
+        // safe to deploy before the accompanying ALTER TABLE has been run.
+        $auditable = [
+            'created_by'             => Auth::id(),
+            'policy_override'        => $violation ? 1 : 0,
+            'policy_override_reason' => $violation ? ($request->override_reason ?: 'Recorded by management.') : null,
+        ];
+
+        foreach ($auditable as $column => $value) {
+            if (Schema::hasColumn('leave_requests', $column)) {
+                $payload[$column] = $value;
+            }
+        }
+
+        $leave = LeaveRequest::create($payload);
+
+        $leave->load('user:id,name,email,profile_pic,employee_type,manager_id');
+
+        return response()->json([
+            'message'  => 'Leave recorded for ' . $employee->name . '.',
+            'data'     => $leave,
+            'override' => (bool) $violation,
+        ], 201);
+    }
 
     // Approve or reject a leave request
     public function update(Request $request, $id)
