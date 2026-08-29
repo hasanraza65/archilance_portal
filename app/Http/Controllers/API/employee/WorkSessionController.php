@@ -14,6 +14,7 @@ use App\Models\TrackWindow;
 use App\Models\WorkingHour;
 use App\Models\ActivityLog;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Schema;
 use App\Traits\ResolvesClientTime;
 use App\Traits\BuildsWindowActivity;
 
@@ -358,6 +359,13 @@ class WorkSessionController extends Controller
     {
         $userId = Auth::id();
 
+        // Set when the session we are stopping was closed by the CheckHeartBeat
+        // watchdog rather than by a person. That close is a GUESS (a sleeping
+        // laptop looks exactly like a finished day), so an explicit stop arriving
+        // afterwards is better information and is allowed to extend it. A session
+        // a user really stopped is never touched — see the guard below.
+        $wasProvisional = false;
+
         // If work_session_id is provided, stop that specific session.
         // This prevents stale queued stop-actions from closing a later active session.
         if ($request->filled('work_session_id')) {
@@ -369,12 +377,17 @@ class WorkSessionController extends Controller
                 return response()->json(['message' => 'Work session not found.'], 404);
             }
 
-            // Already stopped — accept gracefully so the action queue can move on
             if (!is_null($openSession->end_time)) {
-                return response()->json([
-                    'message' => 'Work session already stopped.',
-                    'work_session' => $openSession
-                ]);
+                if (!$this->isProvisionallyClosed($openSession)) {
+                    // Genuinely stopped already — accept gracefully so the action
+                    // queue can move on. Unchanged behaviour.
+                    return response()->json([
+                        'message' => 'Work session already stopped.',
+                        'work_session' => $openSession
+                    ]);
+                }
+
+                $wasProvisional = true;
             }
         } else {
             // Fallback: stop the latest open session (legacy / web path)
@@ -382,6 +395,15 @@ class WorkSessionController extends Controller
                 ->whereNull('end_time')
                 ->latest('start_time')
                 ->first();
+
+            // Older clients don't send work_session_id. If the watchdog closed
+            // their session while they were still working, there is no open row to
+            // find and their stop used to vanish silently — taking every hour
+            // since the auto-close with it. Fall back to that provisional session.
+            if (!$openSession) {
+                $openSession = $this->latestProvisionallyClosedSession($userId);
+                $wasProvisional = (bool) $openSession;
+            }
 
             if (!$openSession) {
                 return response()->json([
@@ -406,6 +428,62 @@ class WorkSessionController extends Controller
             $sessionEndDate = $request->filled('end_date')
                 ? Carbon::parse($request->end_date)->toDateString()
                 : $now->toDateString();
+        }
+
+        // ------------------------------------------------------------------
+        // EXTENDING A PROVISIONALLY-CLOSED SESSION
+        // ------------------------------------------------------------------
+        // Only reached when the watchdog closed this session and the app has now
+        // come back to stop it properly. Four guards, each closing a way this
+        // could over-credit time:
+        if ($wasProvisional) {
+            $clientGaveTime = $this->hasClientUtc($request->input('end_utc'))
+                || $request->filled('end_time');
+
+            // The legacy path carries the date in $sessionEndDate and the time in
+            // $sessionEndTime SEPARATELY — and Carbon::parse('02:23:00') dates that
+            // time TODAY. Recombine into one absolute instant before comparing
+            // anything, or every guard below compares against the wrong day.
+            $proposedEnd = Carbon::parse($sessionEndDate . ' ' . $sessionEndTime->toTimeString());
+
+            $currentEnd = $this->sessionEndAt($openSession);
+
+            // 1. No client timestamp → do NOT fall back to now(). A stop that sat
+            //    in the offline queue for hours would otherwise bill every one of
+            //    them. Use the last moment we can PROVE the app was alive instead;
+            //    and when there is no proof at all (no heartbeat, no screenshot),
+            //    leave the recorded end exactly where it is rather than reaching
+            //    for now() — that would be the very over-crediting this guards.
+            if (!$clientGaveTime) {
+                $proposedEnd = $this->lastProvenActivityAt($openSession)
+                    ?: ($currentEnd ?: $proposedEnd);
+            }
+
+            // 2. Never move an end backwards.
+            if ($currentEnd && $proposedEnd->lessThan($currentEnd)) {
+                $proposedEnd = $currentEnd;
+            }
+
+            // 3. Never grow past the start of a later session, which would make two
+            //    sessions overlap and double-count the overlap in every report.
+            $nextStart = $this->nextSessionStartAfter($openSession);
+            if ($nextStart && $proposedEnd->greaterThan($nextStart)) {
+                $proposedEnd = $nextStart;
+            }
+
+            // 4. Never end in the future (a client clock running fast).
+            if ($proposedEnd->greaterThan($now)) {
+                $proposedEnd = $now;
+            }
+
+            $sessionEndTime = $proposedEnd;
+            $sessionEndDate = $proposedEnd->toDateString();
+
+            // The guess has been replaced by a real stop, so it is final now and
+            // must never be extended again.
+            if ($this->supportsAutoClose()) {
+                $openSession->auto_closed_at = null;
+            }
         }
 
         // ----------------------------------------------
@@ -442,6 +520,114 @@ class WorkSessionController extends Controller
             'message' => 'Work session stopped successfully.',
             'work_session' => $openSession
         ]);
+    }
+
+    /* ------------------------------------------------------------------
+     | Provisional-close helpers
+     |
+     | A session closed by CheckHeartBeat carries `auto_closed_at`; one the
+     | user stopped does not. Every method here is guarded by
+     | Schema::hasColumn so the controller still works if the code is
+     | deployed before the migration has been run.
+     ------------------------------------------------------------------ */
+
+    /**
+     * Whether the auto_closed_at column exists yet. Memoised per request:
+     * Schema::hasColumn hits information_schema every call, and stop() would
+     * otherwise ask two or three times for an answer that cannot change.
+     */
+    private static ?bool $supportsAutoClose = null;
+
+    private function supportsAutoClose(): bool
+    {
+        if (self::$supportsAutoClose === null) {
+            self::$supportsAutoClose = Schema::hasColumn('work_sessions', 'auto_closed_at');
+        }
+
+        return self::$supportsAutoClose;
+    }
+
+    /** True when the watchdog closed this session, not a person. */
+    private function isProvisionallyClosed(WorkSession $session): bool
+    {
+        return $this->supportsAutoClose() && !is_null($session->auto_closed_at);
+    }
+
+    /** The user's most recent watchdog-closed session, for clients that send no id. */
+    private function latestProvisionallyClosedSession($userId): ?WorkSession
+    {
+        if (!$this->supportsAutoClose()) {
+            return null;
+        }
+
+        return WorkSession::where('user_id', $userId)
+            ->whereNotNull('auto_closed_at')
+            ->whereNotNull('end_time')
+            ->latest('start_time')
+            ->first();
+    }
+
+    /** A session's current end as an absolute instant, or null if still open. */
+    private function sessionEndAt(WorkSession $session): ?Carbon
+    {
+        if (is_null($session->end_time)) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * The latest moment we have PROOF the app was alive for this session —
+     * the newer of its last heartbeat and its last screenshot. Used instead of
+     * now() when a stop arrives without a client timestamp, so a long-queued
+     * stop cannot bill the hours it spent sitting in the queue.
+     */
+    private function lastProvenActivityAt(WorkSession $session): ?Carbon
+    {
+        $best = null;
+
+        foreach ([$session->last_heartbeat, Screenshot::where('session_id', $session->id)->max('created_at')] as $value) {
+            if (empty($value)) {
+                continue;
+            }
+            try {
+                $at = Carbon::parse($value);
+            } catch (\Throwable $e) {
+                continue;
+            }
+            if (is_null($best) || $at->greaterThan($best)) {
+                $best = $at;
+            }
+        }
+
+        return $best;
+    }
+
+    /** Start of this user's next session after the given one, if any. */
+    private function nextSessionStartAfter(WorkSession $session): ?Carbon
+    {
+        $startedAt = $session->start_date . ' ' . $session->start_time;
+
+        $next = WorkSession::where('user_id', $session->user_id)
+            ->where('id', '!=', $session->id)
+            ->whereRaw("CONCAT(start_date, ' ', start_time) > ?", [$startedAt])
+            ->orderByRaw("CONCAT(start_date, ' ', start_time) ASC")
+            ->first();
+
+        if (!$next) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($next->start_date . ' ' . $next->start_time);
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 
     public function destroy($id)

@@ -7,6 +7,7 @@ use App\Models\WorkSession;
 use App\Models\Screenshot;
 use Carbon\Carbon;
 use DB;
+use Illuminate\Support\Facades\Schema;
 
 class CheckHeartBeat extends Command
 {
@@ -96,6 +97,16 @@ class CheckHeartBeat extends Command
 
             $session->end_date = $end->toDateString();
             $session->end_time = $end->toTimeString();
+
+            // Mark this close as a GUESS, not a fact. The app may simply have been
+            // asleep or offline; if it comes back and the user presses Stop, that
+            // explicit stop is better information and is allowed to extend the
+            // session (see WorkSessionController::stop). A close the user made
+            // themselves never carries this flag and can never be overwritten.
+            if (Schema::hasColumn('work_sessions', 'auto_closed_at')) {
+                $session->auto_closed_at = now();
+            }
+
             $session->save();
         }
     }

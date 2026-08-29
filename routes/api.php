@@ -218,6 +218,33 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/deleted-screenshots/{session_id}', [App\Http\Controllers\API\employee\ScreenshotController::class, 'deletedScreenshots']);
 
 
+        /*
+         | Payroll & Salaries  (ADDITIVE — no existing route is modified, so an
+         | older client that knows nothing about these paths is unaffected.)
+         | The identical block is registered for Executives further down; see the
+         | note there for why both prefixes are needed.
+         */
+        Route::get('/salary', [App\Http\Controllers\API\admin\SalaryController::class, 'index']);
+        Route::get('/salary/{userId}', [App\Http\Controllers\API\admin\SalaryController::class, 'show']);
+        Route::post('/salary/{userId}', [App\Http\Controllers\API\admin\SalaryController::class, 'setSalary']);
+
+        Route::get('/payroll', [App\Http\Controllers\API\admin\PayrollController::class, 'index']);
+        Route::get('/payroll-report', [App\Http\Controllers\API\admin\PayrollController::class, 'report']);
+        Route::post('/payroll/generate', [App\Http\Controllers\API\admin\PayrollController::class, 'generate']);
+        Route::get('/payroll/{id}', [App\Http\Controllers\API\admin\PayrollController::class, 'show']);
+        Route::post('/payroll/{id}/submit', [App\Http\Controllers\API\admin\PayrollController::class, 'submit']);
+        Route::post('/payroll/{id}/approve', [App\Http\Controllers\API\admin\PayrollController::class, 'approve']);
+        Route::post('/payroll/{id}/reopen', [App\Http\Controllers\API\admin\PayrollController::class, 'reopen']);
+        Route::post('/payroll/{id}/cancel', [App\Http\Controllers\API\admin\PayrollController::class, 'cancel']);
+        Route::post('/payroll/{id}/pay-all', [App\Http\Controllers\API\admin\PayrollController::class, 'markRunPaid']);
+
+        Route::get('/payslip/{payslipId}', [App\Http\Controllers\API\admin\PayrollController::class, 'showPayslip']);
+        Route::post('/payslip/{payslipId}', [App\Http\Controllers\API\admin\PayrollController::class, 'updatePayslip']);
+        Route::post('/payslip/{payslipId}/item', [App\Http\Controllers\API\admin\PayrollController::class, 'addItem']);
+        Route::delete('/payslip/{payslipId}/item/{itemId}', [App\Http\Controllers\API\admin\PayrollController::class, 'deleteItem']);
+        Route::post('/payslip/{payslipId}/pay', [App\Http\Controllers\API\admin\PayrollController::class, 'markPaid']);
+        Route::post('/payslip/{payslipId}/unpay', [App\Http\Controllers\API\admin\PayrollController::class, 'unmarkPaid']);
+
     });
 
 
@@ -381,7 +408,45 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::middleware('employeeType:Executive')->group(function () {
             Route::post('/session-heartbeat', [App\Http\Controllers\API\employee\WorkSessionController::class, 'sessionHeartBeat']);
+
+            /*
+             | Payroll & Salaries for Executives.
+             |
+             | Executives are user_role = 3 (there are no role 6/7 accounts in this
+             | system), so they reach the API through the `employee` prefix, not
+             | `admin`. This mirrors the same controller methods behind
+             | /api/employee/* and is gated to employee_type = Executive, so no
+             | ordinary employee, manager or internee can see company payroll.
+             |
+             | Employees' own payslips are further down, outside this group.
+             */
+            Route::get('/salary', [App\Http\Controllers\API\admin\SalaryController::class, 'index']);
+            Route::get('/salary/{userId}', [App\Http\Controllers\API\admin\SalaryController::class, 'show']);
+            Route::post('/salary/{userId}', [App\Http\Controllers\API\admin\SalaryController::class, 'setSalary']);
+
+            Route::get('/payroll', [App\Http\Controllers\API\admin\PayrollController::class, 'index']);
+            Route::get('/payroll-report', [App\Http\Controllers\API\admin\PayrollController::class, 'report']);
+            Route::post('/payroll/generate', [App\Http\Controllers\API\admin\PayrollController::class, 'generate']);
+            Route::get('/payroll/{id}', [App\Http\Controllers\API\admin\PayrollController::class, 'show']);
+            Route::post('/payroll/{id}/submit', [App\Http\Controllers\API\admin\PayrollController::class, 'submit']);
+            Route::post('/payroll/{id}/approve', [App\Http\Controllers\API\admin\PayrollController::class, 'approve']);
+            Route::post('/payroll/{id}/reopen', [App\Http\Controllers\API\admin\PayrollController::class, 'reopen']);
+            Route::post('/payroll/{id}/cancel', [App\Http\Controllers\API\admin\PayrollController::class, 'cancel']);
+            Route::post('/payroll/{id}/pay-all', [App\Http\Controllers\API\admin\PayrollController::class, 'markRunPaid']);
+
+            Route::get('/payslip/{payslipId}', [App\Http\Controllers\API\admin\PayrollController::class, 'showPayslip']);
+            Route::post('/payslip/{payslipId}', [App\Http\Controllers\API\admin\PayrollController::class, 'updatePayslip']);
+            Route::post('/payslip/{payslipId}/item', [App\Http\Controllers\API\admin\PayrollController::class, 'addItem']);
+            Route::delete('/payslip/{payslipId}/item/{itemId}', [App\Http\Controllers\API\admin\PayrollController::class, 'deleteItem']);
+            Route::post('/payslip/{payslipId}/pay', [App\Http\Controllers\API\admin\PayrollController::class, 'markPaid']);
+            Route::post('/payslip/{payslipId}/unpay', [App\Http\Controllers\API\admin\PayrollController::class, 'unmarkPaid']);
         });
+
+        // Every employee can read THEIR OWN payslips (scoped to Auth::id() in the
+        // controller). Deliberately named differently from the management routes
+        // above so the two can never be confused.
+        Route::get('/my-payslips', [App\Http\Controllers\API\employee\MyPayslipController::class, 'index']);
+        Route::get('/my-payslips/{id}', [App\Http\Controllers\API\employee\MyPayslipController::class, 'show']);
 
 
         Route::get('/projects-with-members', [ProjectController::class, 'projectsWithMember']);

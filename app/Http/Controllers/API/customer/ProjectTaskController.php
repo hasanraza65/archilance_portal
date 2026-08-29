@@ -57,13 +57,15 @@ class ProjectTaskController extends Controller
 
         // Calculate working hours for each assignee
         $assigneesWithHours = [];
-        
+        $seenEmployeeIds = [];
+
         foreach ($task->assignees as $assignee) {
             $employeeId = $assignee->employee_id;
-            
+            $seenEmployeeIds[] = (int) $employeeId;
+
             // Calculate total working hours for this employee on this task
             $totalHours = $this->calculateEmployeeTaskHours($employeeId, $task->id);
-            
+
             $assigneesWithHours[] = [
                 'assignee' => $assignee,
                 'user' => $assignee->user,
@@ -71,7 +73,43 @@ class ProjectTaskController extends Controller
                 'total_working_hours_formatted' => $this->formatHours($totalHours)
             ];
         }
-    
+
+        // Anyone who logged time on this task but was later REMOVED as an assignee
+        // must still show up here — the loop above only sees who is assigned RIGHT
+        // NOW, so their hours silently vanished from this breakdown even though
+        // calculateTaskTotalHours() (this task's TOTAL, below) sums every session
+        // on this task_id regardless of current assignment.
+        $loggedEmployeeIds = WorkSession::where('task_id', $task->id)
+            ->distinct()
+            ->pluck('user_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        $formerEmployeeIds = array_diff($loggedEmployeeIds, $seenEmployeeIds);
+
+        if (!empty($formerEmployeeIds)) {
+            // withTrashed(): a former assignee's account may since have been
+            // deactivated/deleted too — their name should still appear rather
+            // than silently falling back to "Unknown".
+            $formerUsers = \App\Models\User::withTrashed()->whereIn('id', $formerEmployeeIds)->get()->keyBy('id');
+
+            foreach ($formerEmployeeIds as $employeeId) {
+                $totalHours = $this->calculateEmployeeTaskHours($employeeId, $task->id);
+
+                if ($totalHours <= 0) {
+                    continue; // nothing meaningful to show
+                }
+
+                $assigneesWithHours[] = [
+                    'assignee' => null,
+                    'user' => $formerUsers->get($employeeId),
+                    'total_working_hours' => $totalHours,
+                    'total_working_hours_formatted' => $this->formatHours($totalHours),
+                    'removed_from_task' => true,
+                ];
+            }
+        }
+
         // Add the calculated hours to the task response
         $task->assignees_with_hours = $assigneesWithHours;
 
