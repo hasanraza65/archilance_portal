@@ -182,36 +182,16 @@ class ProjectTaskController extends Controller
         $sessionsByEmployee = $allSessions->groupBy('user_id');
 
         $assigneesWithHours = [];
+        $seenEmployeeIds = [];
+
         foreach ($task->assignees as $assignee) {
-            $sessions     = $sessionsByEmployee->get($assignee->employee_id, collect());
-            $totalSeconds = 0;
+            $employeeId = (int) $assignee->employee_id;
+            $seenEmployeeIds[] = $employeeId;
 
-            foreach ($sessions as $session) {
-                try {
-                    $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
-                    $sessionEnd   = is_null($session->end_time)
-                        ? now()
-                        : Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
-
-                    $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
-
-                    // Merge overlapping idle rows and clamp them to this session's own
-                    // window, so the same minute can never be subtracted twice and idle
-                    // can never exceed the session duration.
-                    $adjustmentSeconds = $this->sessionIdleSeconds(
-                        $adjustmentsBySession->get($session->id, collect()),
-                        $sessionStart,
-                        $sessionEnd
-                    );
-
-                    $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
-                    if ($netSeconds > 0) {
-                        $totalSeconds += $netSeconds;
-                    }
-                } catch (\Exception $e) {
-                    continue;
-                }
-            }
+            $totalSeconds = $this->sumSessionsSeconds(
+                $sessionsByEmployee->get($assignee->employee_id, collect()),
+                $adjustmentsBySession
+            );
 
             $assigneesWithHours[] = [
                 'assignee'                      => $assignee,
@@ -221,9 +201,78 @@ class ProjectTaskController extends Controller
             ];
         }
 
+        // Anyone who logged time on this task but was later REMOVED as an assignee
+        // must still show up here — the loop above only sees who is assigned RIGHT
+        // NOW, so their hours silently vanished from this breakdown even though
+        // $allSessions (the task's TOTAL, computed above from every session on this
+        // task_id regardless of current assignment) always included them.
+        $formerEmployeeIds = array_diff($sessionsByEmployee->keys()->map(fn ($id) => (int) $id)->all(), $seenEmployeeIds);
+
+        if (!empty($formerEmployeeIds)) {
+            // withTrashed(): a former assignee's account may since have been
+            // deactivated/deleted too — their name should still appear rather
+            // than silently falling back to "Unknown".
+            $formerUsers = \App\Models\User::withTrashed()->whereIn('id', $formerEmployeeIds)->get()->keyBy('id');
+
+            foreach ($formerEmployeeIds as $employeeId) {
+                $totalSeconds = $this->sumSessionsSeconds(
+                    $sessionsByEmployee->get($employeeId, collect()),
+                    $adjustmentsBySession
+                );
+
+                if ($totalSeconds <= 0) {
+                    continue; // nothing meaningful to show
+                }
+
+                $assigneesWithHours[] = [
+                    'assignee'                      => null,
+                    'user'                          => $formerUsers->get($employeeId),
+                    'total_working_hours'           => $totalSeconds,
+                    'total_working_hours_formatted' => $this->formatHours($totalSeconds),
+                    'removed_from_task'             => true,
+                ];
+            }
+        }
+
         $task->assignees_with_hours = $assigneesWithHours;
 
         return response()->json($task);
+    }
+
+    /**
+     * Net seconds across a collection of WorkSession rows (duration minus merged,
+     * clamped idle) — the exact per-session math show() used inline, extracted so
+     * current-assignee and former-assignee totals are computed identically.
+     */
+    private function sumSessionsSeconds($sessions, $adjustmentsBySession): int
+    {
+        $totalSeconds = 0;
+
+        foreach ($sessions as $session) {
+            try {
+                $sessionStart = Carbon::parse($session->start_date . ' ' . $session->start_time);
+                $sessionEnd   = is_null($session->end_time)
+                    ? now()
+                    : Carbon::parse(($session->end_date ?? $session->start_date) . ' ' . $session->end_time);
+
+                $sessionDuration = abs($sessionEnd->diffInSeconds($sessionStart));
+
+                $adjustmentSeconds = $this->sessionIdleSeconds(
+                    $adjustmentsBySession->get($session->id, collect()),
+                    $sessionStart,
+                    $sessionEnd
+                );
+
+                $netSeconds = (int) max(0, $sessionDuration - $adjustmentSeconds);
+                if ($netSeconds > 0) {
+                    $totalSeconds += $netSeconds;
+                }
+            } catch (\Exception $e) {
+                continue;
+            }
+        }
+
+        return $totalSeconds;
     }
 
     // Helper method to format seconds into hours and minutes
