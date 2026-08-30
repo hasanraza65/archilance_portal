@@ -29,7 +29,7 @@ class LeaveRequestController extends Controller
     private const ADDITIONAL_LEAVE_USER_IDS = [109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162, 166];
 
     /** Types accepted on the wire. */
-    private const ACCEPTED_TYPES = 'sick,casual,annual,marriage,unpaid,additional';
+    private const ACCEPTED_TYPES = 'sick,casual,annual,marriage,unpaid,additional,maternity,paternity';
 
     // ── Visibility rules ────────────────────────────────────────────────────
     // This controller backs /admin/leave-request, /supervisor/leave-request AND

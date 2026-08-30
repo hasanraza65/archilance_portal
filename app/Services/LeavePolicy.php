@@ -27,6 +27,10 @@ use Carbon\Carbon;
  *                                           add up to the same total)
  *   Sick         8 days   working days
  *   Marriage    15 days   calendar days  — ONCE PER EMPLOYMENT, not per year
+ *   Maternity   90 days   calendar days  — FEMALE only, per birth (not per year).
+ *                                           First 60 days paid, the optional
+ *                                           third month unpaid.
+ *   Paternity    7 days   calendar days  — MALE only, per birth (not per year)
  *   Unpaid      no cap    calendar days  — fallback for anything beyond the above
  *
  * ── RULES ────────────────────────────────────────────────────────────────────
@@ -48,6 +52,19 @@ use Carbon\Carbon;
  *   Sick       · unrestricted during probation
  *              · may not run straight into annual
  *   Marriage   · 15 calendar days, once per employment; the rest goes to Unpaid
+ *   Maternity  · 3 months (90 calendar days) per birth. The first 2 months are
+ *                paid; a third month may be taken unpaid. Coordinate with HR in
+ *                advance. Female employees.
+ *   Paternity  · 1 week (7 calendar days) fully paid, per birth. Notify HR in
+ *                advance where reasonably possible. Male employees.
+ *
+ * Maternity and Paternity are administered SEPARATELY from Annual, Casual and
+ * Sick — they draw on their own balances and never touch those.
+ *
+ * NOTE ON PAY: this class models ENTITLEMENT and eligibility only. The paid /
+ * unpaid split inside Maternity is surfaced for display (see summary()'s
+ * `paid_days` and the note) but no salary logic is applied anywhere yet — that
+ * is deliberate and was agreed as out of scope for this change.
  *
  * Internees and the Outsource Department are outside this policy entirely.
  */
@@ -61,10 +78,15 @@ class LeavePolicy
     public const ADDITIONAL = 'additional'; // BIM Team only — its own pool
     public const SICK       = 'sick';
     public const MARRIAGE   = 'marriage';
+    public const MATERNITY  = 'maternity'; // female employees
+    public const PATERNITY  = 'paternity'; // male employees
     public const UNPAID     = 'unpaid';
 
     /** Types a request may be submitted as, in display order. */
-    public const TYPES = [self::CASUAL, self::ADDITIONAL, self::ANNUAL, self::SICK, self::MARRIAGE, self::UNPAID];
+    public const TYPES = [
+        self::CASUAL, self::ADDITIONAL, self::ANNUAL, self::SICK,
+        self::MARRIAGE, self::MATERNITY, self::PATERNITY, self::UNPAID,
+    ];
 
     // ── Entitlements ─────────────────────────────────────────────────────────
     public const ANNUAL_DAYS     = 10;
@@ -72,6 +94,16 @@ class LeavePolicy
     public const ADDITIONAL_DAYS = 8;  // BIM Team only, separate pool
     public const SICK_DAYS       = 8;
     public const MARRIAGE_DAYS   = 15; // lifetime, not per cycle
+
+    // 3 months, expressed in calendar days so the maths never depends on which
+    // months the leave happens to span (Feb–Apr and Jul–Sep must cost the same).
+    public const MATERNITY_DAYS      = 90;
+    public const MATERNITY_PAID_DAYS = 60; // first 2 months paid; the 3rd is unpaid
+    public const PATERNITY_DAYS      = 7;  // 1 week, fully paid
+
+    // ── Gender values (users.gender) ─────────────────────────────────────────
+    public const GENDER_MALE   = 'male';
+    public const GENDER_FEMALE = 'female';
 
     // ── Rule constants ───────────────────────────────────────────────────────
     // Casual and Additional share every restriction below except the
@@ -123,6 +155,8 @@ class LeavePolicy
             $type === self::ADDITIONAL                      => self::ADDITIONAL,
             $type === self::SICK || $type === 'medical leave' => self::SICK,
             $type === self::MARRIAGE                        => self::MARRIAGE,
+            $type === self::MATERNITY                       => self::MATERNITY,
+            $type === self::PATERNITY                       => self::PATERNITY,
             $type === self::UNPAID                          => self::UNPAID,
             default                                         => self::CASUAL,
         };
@@ -149,10 +183,19 @@ class LeavePolicy
         return (bool) preg_match('/added\s+(by|from)\s+admin/i', (string) $reason);
     }
 
-    /** Annual, marriage and unpaid consume weekends; everything else does not. */
+    /**
+     * Annual, marriage, maternity, paternity and unpaid consume weekends;
+     * everything else does not. Maternity/Paternity are continuous recovery and
+     * bonding periods — "3 months" and "1 week" plainly mean calendar time, not
+     * 90 or 7 working days.
+     */
     public static function countsCalendarDays(string $type): bool
     {
-        return in_array($type, [self::ANNUAL, self::MARRIAGE, self::UNPAID], true);
+        return in_array(
+            $type,
+            [self::ANNUAL, self::MARRIAGE, self::MATERNITY, self::PATERNITY, self::UNPAID],
+            true
+        );
     }
 
     public static function label(string $type): string
@@ -163,6 +206,8 @@ class LeavePolicy
             self::ADDITIONAL => 'Additional',
             self::SICK       => 'Sick',
             self::MARRIAGE   => 'Marriage',
+            self::MATERNITY  => 'Maternity',
+            self::PATERNITY  => 'Paternity',
             self::UNPAID     => 'Unpaid',
             default          => ucfirst($type),
         };
@@ -204,6 +249,38 @@ class LeavePolicy
     public function isBimTeam(): bool
     {
         return strcasecmp(trim((string) $this->user->employee_team), self::BIM_TEAM) === 0;
+    }
+
+    /** users.gender, lowercased — '' when the column is missing or not yet set. */
+    public function gender(): string
+    {
+        return strtolower(trim((string) ($this->user->gender ?? '')));
+    }
+
+    /**
+     * Whether a gender-specific type applies to this employee.
+     *
+     * An employee whose gender is NOT RECORDED passes both checks. Gender was
+     * added at the same time as these categories, so every pre-existing employee
+     * has NULL — treating that as "ineligible" would hide Maternity from every
+     * woman already in the system until HR got round to filling the field in.
+     * Being permissive here fails safe: HR still approves each request, whereas
+     * an entitlement silently missing from the UI is invisible until someone
+     * complains.
+     */
+    public function appliesToGender(string $type): bool
+    {
+        $gender = $this->gender();
+
+        if ($gender === '') {
+            return true; // not recorded yet — don't hide the entitlement
+        }
+
+        return match ($type) {
+            self::MATERNITY => $gender === self::GENDER_FEMALE,
+            self::PATERNITY => $gender === self::GENDER_MALE,
+            default         => true,
+        };
     }
 
     /**
@@ -314,6 +391,8 @@ class LeavePolicy
             self::ADDITIONAL => $this->isBimTeam() ? self::ADDITIONAL_DAYS : 0,
             self::SICK       => self::SICK_DAYS,
             self::MARRIAGE   => self::MARRIAGE_DAYS,
+            self::MATERNITY  => $this->appliesToGender(self::MATERNITY) ? self::MATERNITY_DAYS : 0,
+            self::PATERNITY  => $this->appliesToGender(self::PATERNITY) ? self::PATERNITY_DAYS : 0,
             default          => null,
         };
     }
@@ -453,6 +532,13 @@ class LeavePolicy
                 continue;
             }
 
+            // Same treatment for the gender-specific categories: a man should
+            // not see a permanently-zero Maternity card, and vice versa. An
+            // employee with no gender recorded sees BOTH (see appliesToGender).
+            if (in_array($type, [self::MATERNITY, self::PATERNITY], true) && !$this->appliesToGender($type)) {
+                continue;
+            }
+
             $total = $this->effectiveEntitlementFor($type, $reference);
             $used  = $excluded ? 0 : $this->usedFor($type, $reference);
 
@@ -469,9 +555,17 @@ class LeavePolicy
             } elseif ($type === self::CASUAL && $onProbation) {
                 $note = 'During probation a maximum of ' . self::CASUAL_PROBATION_MAX
                     . ' casual days may be used (' . $this->casualUsedDuringProbation() . ' used so far).';
+            } elseif ($type === self::MATERNITY) {
+                $note = 'The first ' . self::MATERNITY_PAID_DAYS . ' days are fully paid. '
+                    . 'You may return to work after those, or extend to the full '
+                    . self::MATERNITY_DAYS . ' days with the remainder unpaid. '
+                    . 'Please inform and coordinate with HR and management in advance.';
+            } elseif ($type === self::PATERNITY) {
+                $note = 'One week, fully paid, following the birth of your child. '
+                    . 'Please notify HR and management in advance wherever reasonably possible.';
             }
 
-            $entitlements[$type] = [
+            $entitlement = [
                 'key'       => $type,
                 'label'     => self::label($type),
                 'total'     => $total,
@@ -482,6 +576,15 @@ class LeavePolicy
                 'available' => $available,
                 'note'      => $note,
             ];
+
+            // Additive, maternity-only: lets a client show the paid/unpaid split
+            // without hard-coding the numbers. No pay logic is applied anywhere.
+            if ($type === self::MATERNITY) {
+                $entitlement['paid_days']   = self::MATERNITY_PAID_DAYS;
+                $entitlement['unpaid_days'] = max(0, self::MATERNITY_DAYS - self::MATERNITY_PAID_DAYS);
+            }
+
+            $entitlements[$type] = $entitlement;
         }
 
         return [
@@ -540,6 +643,8 @@ class LeavePolicy
             self::ADDITIONAL => $this->validateAdditional($start, $end, $days, $excludeId),
             self::SICK       => $this->validateSick($start, $end, $days, $excludeId),
             self::MARRIAGE   => $this->validateMarriage($days, $excludeId),
+            self::MATERNITY  => $this->validateParentalLeave(self::MATERNITY, $start, $days, $excludeId),
+            self::PATERNITY  => $this->validateParentalLeave(self::PATERNITY, $start, $days, $excludeId),
             self::UNPAID     => null, // uncapped fallback, no restrictions
             default          => 'Unsupported leave type.',
         };
@@ -713,6 +818,40 @@ class LeavePolicy
             return 'Marriage Leave is ' . self::MARRIAGE_DAYS
                 . ' paid calendar days, once per employment. Used: ' . $used . ', remaining: '
                 . $remaining . '. Any days beyond that should be submitted as Unpaid Leave.';
+        }
+
+        return null;
+    }
+
+    /**
+     * Maternity and Paternity share one shape: a gender check, then a plain
+     * balance check against their own pool.
+     *
+     * Deliberately NO adjacency/gap rules. Unlike Casual or Annual, these are a
+     * single continuous block around a birth — running into another leave type
+     * is normal and not something to block. They are also administered
+     * separately from Annual/Casual/Sick, so they never touch those balances.
+     */
+    private function validateParentalLeave(string $type, Carbon $start, int $days, ?int $excludeId): ?string
+    {
+        if (!$this->appliesToGender($type)) {
+            return self::label($type) . ' Leave is not available for your recorded gender. '
+                . 'If this is wrong, please ask HR to correct it on your profile.';
+        }
+
+        if ($message = $this->checkBalance($type, $days, $start, $excludeId)) {
+            // The balance message is generic; for maternity the useful next step
+            // is specifically "the rest is unpaid", so say that instead.
+            if ($type === self::MATERNITY) {
+                $used = $this->usedFor($type, $start, $excludeId);
+
+                return 'Maternity Leave is ' . self::MATERNITY_DAYS . ' calendar days ('
+                    . self::MATERNITY_PAID_DAYS . ' paid, the remainder unpaid). Used: ' . $used
+                    . ', remaining: ' . max(0, self::MATERNITY_DAYS - $used) . ', requested: ' . $days
+                    . '. Anything beyond that should be submitted as Unpaid Leave.';
+            }
+
+            return $message;
         }
 
         return null;
