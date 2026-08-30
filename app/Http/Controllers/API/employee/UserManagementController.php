@@ -10,6 +10,19 @@ use Auth;
 
 class UserManagementController extends Controller
 {
+    /**
+     * Accepts 'male' / 'female' in any casing, anything else becomes null
+     * ("not recorded"). Kept permissive rather than a validation rule so an
+     * unexpected value can never make an otherwise-valid user save fail —
+     * LeavePolicy already treats null as "show both parental categories".
+     */
+    private function normalizeGender($value): ?string
+    {
+        $gender = strtolower(trim((string) $value));
+
+        return in_array($gender, ['male', 'female'], true) ? $gender : null;
+    }
+
     // Helper to detect role from route
     private function getRoleFromRequest(Request $request)
     {
@@ -235,6 +248,9 @@ class UserManagementController extends Controller
             'user_role' => $roleId,
             'employee_type' => $request->employee_type ?? '',
             'employee_team' => $request->input('employee_team') ?: null,
+            // Drives Maternity / Paternity eligibility (LeavePolicy). Optional —
+            // null means "not recorded", which the policy treats permissively.
+            'gender' => $this->normalizeGender($request->input('gender')),
             'internee_manager_id' => $request->internee_manager_id ?? null,
             'manager_id' => $request->manager_id ?? null,
             'probation_period_end_date' => $request->probation_period_end_date,
@@ -304,6 +320,12 @@ class UserManagementController extends Controller
         // predate the field must never wipe a saved team on an ordinary edit.
         if ($request->has('employee_team')) {
             $updateData['employee_team'] = $request->input('employee_team') ?: null;
+        }
+
+        // Same opt-in treatment for gender: an older portal that knows nothing
+        // about the field must not blank it out every time somebody edits a user.
+        if ($request->has('gender')) {
+            $updateData['gender'] = $this->normalizeGender($request->input('gender'));
         }
 
         // Only touch contract_status when the form actually sends it — a normal edit

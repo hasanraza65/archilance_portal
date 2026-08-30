@@ -37,7 +37,7 @@ class LeaveRequestController extends Controller
     private const LEGACY_ADDITIONAL_USER_IDS = [109, 171, 22, 173, 50, 172, 147, 118, 35, 180, 114, 69, 182, 23, 26, 21, 128, 175, 139, 28, 58, 162, 166];
 
     /** Types accepted on the wire. */
-    private const ACCEPTED_TYPES = 'sick,casual,annual,marriage,unpaid,additional';
+    private const ACCEPTED_TYPES = 'sick,casual,annual,marriage,unpaid,additional,maternity,paternity';
 
     private function policy(): LeavePolicy
     {
@@ -93,6 +93,8 @@ class LeaveRequestController extends Controller
                     break; // tallied separately below
                 case 'marriage':
                 case 'unpaid':
+                case 'maternity':
+                case 'paternity':
                     break; // new types are not part of the legacy block
                 default:
                     $typeCounts['casual'] += $days;
