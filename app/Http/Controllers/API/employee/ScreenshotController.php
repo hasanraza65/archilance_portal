@@ -162,104 +162,143 @@ class ScreenshotController extends Controller
 
     public function destroy($id)
     {
-        $userId = Auth::id();
+        if(Auth::user()->user_role != 1 && Auth::user()->user_role != 2){
 
-        // Begin DB transaction for safety
-        DB::beginTransaction();
+            $userId = Auth::id();
 
-        try {
-            $screenshot = Screenshot::where('id', $id)
-                ->where('user_id', $userId)
-                ->firstOrFail();
+            // Begin DB transaction for safety
+            DB::beginTransaction();
 
-            $session = WorkSession::find($screenshot->session_id);
+            try {
+                $screenshot = Screenshot::where('id', $id)
+                    ->where('user_id', $userId)
+                    ->firstOrFail();
 
-            if (!$session) {
-                return response()->json(['error' => 'Associated session not found.'], 404);
-            }
+                $session = WorkSession::find($screenshot->session_id);
 
-            $sessionScreenshots = Screenshot::where('session_id', $session->id)
-                ->orderBy('created_at')
-                ->get();
+                if (!$session) {
+                    return response()->json(['error' => 'Associated session not found.'], 404);
+                }
 
-            $index = $sessionScreenshots->search(fn($ss) => $ss->id === $screenshot->id);
+                $sessionScreenshots = Screenshot::where('session_id', $session->id)
+                    ->orderBy('created_at')
+                    ->get();
 
-            // CASE 1: Only screenshot in session → delete session entirely
-            if ($sessionScreenshots->count() === 1) {
+                $index = $sessionScreenshots->search(fn($ss) => $ss->id === $screenshot->id);
+
+                // CASE 1: Only screenshot in session → delete session entirely
+                if ($sessionScreenshots->count() === 1) {
+                    if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
+                        // \Storage::disk('public')->delete($screenshot->screenshot_file);
+                    }
+
+                    $screenshot->delete();
+                    $session->delete();
+
+                    DB::commit();
+
+                    return response()->json(['message' => 'Screenshot and session deleted (only screenshot).']);
+                }
+
+                // Determine the adjustment range (from previous screenshot to current)
+                $prevScreenshot = $index > 0 ? $sessionScreenshots[$index - 1] : null;
+                $nextScreenshot = $sessionScreenshots[$index + 1] ?? null;
+
+                $adjustStart = $prevScreenshot
+                    ? $prevScreenshot->created_at
+                    : $screenshot->created_at->copy()->subSeconds(1);
+
+                $adjustEnd = $nextScreenshot
+                    ? $screenshot->created_at
+                    : $screenshot->created_at->copy(); // If last, adjust only that point
+
+                // Log this time removal — but ONLY for the parts of the range that are not
+                // already covered by an existing idle record. Blindly inserting the whole
+                // [previous screenshot -> this screenshot] span was a primary source of
+                // OVERLAPPING idle rows: the employee is frequently idle during part of those
+                // 4-9 minutes, so an idle row already existed and the overlap then got
+                // subtracted twice from worked time.
+                $adjustStartAt = Carbon::parse($adjustStart);
+                $adjustEndAt = Carbon::parse($adjustEnd);
+
+                if ($adjustEndAt->gt($adjustStartAt)) {
+                    // CLOSED rows only — an open row has no end, so subtractSlots would expand it
+                    // to "now" and one stale open row would swallow this entire range, leaving the
+                    // deleted screenshot's time still billed. Closed rows are also precisely what
+                    // the readers count.
+                    $overlappingIdle = SessionTimeAdjustment::where('session_id', $session->id)
+                        ->whereNotNull('end_time')
+                        ->where('start_time', '<', $adjustEndAt)
+                        ->where('end_time', '>', $adjustStartAt)
+                        ->orderBy('start_time')
+                        ->get();
+
+                    foreach ($this->subtractSlots($adjustStartAt, $adjustEndAt, $overlappingIdle) as $freeSlot) {
+                        [$freeStart, $freeEnd] = $freeSlot;
+
+                        if ($freeEnd->lte($freeStart)) {
+                            continue;
+                        }
+
+                        SessionTimeAdjustment::create([
+                            'session_id' => $session->id,
+                            'start_time' => $freeStart,
+                            'end_time' => $freeEnd,
+                        ]);
+                    }
+                }
+
+                // Delete screenshot file
                 if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
                     // \Storage::disk('public')->delete($screenshot->screenshot_file);
                 }
 
                 $screenshot->delete();
-                $session->delete();
 
                 DB::commit();
 
-                return response()->json(['message' => 'Screenshot and session deleted (only screenshot).']);
+                return response()->json(['message' => 'Screenshot deleted and time adjustment logged.']);
+            } catch (\Exception $e) {
+                DB::rollBack();
+                return response()->json(['error' => 'Failed to delete screenshot.'], 500);
             }
 
-            // Determine the adjustment range (from previous screenshot to current)
-            $prevScreenshot = $index > 0 ? $sessionScreenshots[$index - 1] : null;
-            $nextScreenshot = $sessionScreenshots[$index + 1] ?? null;
+        }elseif(Auth::user()->user_role == 1 || Auth::user()->user_role == 2){
+             DB::beginTransaction();
 
-            $adjustStart = $prevScreenshot
-                ? $prevScreenshot->created_at
-                : $screenshot->created_at->copy()->subSeconds(1);
+            try {
+                $screenshot = Screenshot::where('id', $id)
+                    ->firstOrFail();
 
-            $adjustEnd = $nextScreenshot
-                ? $screenshot->created_at
-                : $screenshot->created_at->copy(); // If last, adjust only that point
+                $session = WorkSession::find($screenshot->session_id);
 
-            // Log this time removal — but ONLY for the parts of the range that are not
-            // already covered by an existing idle record. Blindly inserting the whole
-            // [previous screenshot -> this screenshot] span was a primary source of
-            // OVERLAPPING idle rows: the employee is frequently idle during part of those
-            // 4-9 minutes, so an idle row already existed and the overlap then got
-            // subtracted twice from worked time.
-            $adjustStartAt = Carbon::parse($adjustStart);
-            $adjustEndAt = Carbon::parse($adjustEnd);
+                if (!$session) {
+                    return response()->json(['error' => 'Associated session not found.'], 404);
+                }
 
-            if ($adjustEndAt->gt($adjustStartAt)) {
-                // CLOSED rows only — an open row has no end, so subtractSlots would expand it
-                // to "now" and one stale open row would swallow this entire range, leaving the
-                // deleted screenshot's time still billed. Closed rows are also precisely what
-                // the readers count.
-                $overlappingIdle = SessionTimeAdjustment::where('session_id', $session->id)
-                    ->whereNotNull('end_time')
-                    ->where('start_time', '<', $adjustEndAt)
-                    ->where('end_time', '>', $adjustStartAt)
-                    ->orderBy('start_time')
+                $sessionScreenshots = Screenshot::where('session_id', $session->id)
+                    ->orderBy('created_at')
                     ->get();
 
-                foreach ($this->subtractSlots($adjustStartAt, $adjustEndAt, $overlappingIdle) as $freeSlot) {
-                    [$freeStart, $freeEnd] = $freeSlot;
+                $index = $sessionScreenshots->search(fn($ss) => $ss->id === $screenshot->id);
 
-                    if ($freeEnd->lte($freeStart)) {
-                        continue;
+                // CASE 1: Only screenshot in session → delete session entirely
+                if ($sessionScreenshots->count() === 1) {
+                    if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
+                         \Storage::disk('public')->delete($screenshot->screenshot_file);
                     }
 
-                    SessionTimeAdjustment::create([
-                        'session_id' => $session->id,
-                        'start_time' => $freeStart,
-                        'end_time' => $freeEnd,
-                    ]);
+                    $screenshot->delete();
+                    $session->delete();
+
+                    DB::commit();
+
+                    return response()->json(['message' => 'Screenshot and session deleted (only screenshot).']);
                 }
             }
-
-            // Delete screenshot file
-            if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
-                // \Storage::disk('public')->delete($screenshot->screenshot_file);
-            }
-
-            $screenshot->delete();
-
-            DB::commit();
-
-            return response()->json(['message' => 'Screenshot deleted and time adjustment logged.']);
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json(['error' => 'Failed to delete screenshot.'], 500);
         }
+
+        
 
     }
 

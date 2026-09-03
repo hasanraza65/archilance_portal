@@ -217,6 +217,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/deleted-screenshots/{session_id}', [App\Http\Controllers\API\employee\ScreenshotController::class, 'deletedScreenshots']);
 
+        Route::post('/delete-screenshot/{id}', [App\Http\Controllers\API\employee\ScreenshotController::class, 'destroy']);
+
 
         /*
          | Payroll & Salaries  (ADDITIVE — no existing route is modified, so an
