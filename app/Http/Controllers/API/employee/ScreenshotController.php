@@ -162,11 +162,13 @@ class ScreenshotController extends Controller
 
     public function destroy($id)
     {
-        if(Auth::user()->user_role != 1 && Auth::user()->user_role != 2){
+        // ============================================================
+        // NORMAL USER
+        // ============================================================
+        if (Auth::user()->user_role != 1 && Auth::user()->user_role != 2) {
 
             $userId = Auth::id();
 
-            // Begin DB transaction for safety
             DB::beginTransaction();
 
             try {
@@ -177,18 +179,29 @@ class ScreenshotController extends Controller
                 $session = WorkSession::find($screenshot->session_id);
 
                 if (!$session) {
-                    return response()->json(['error' => 'Associated session not found.'], 404);
+                    DB::rollBack();
+
+                    return response()->json([
+                        'error' => 'Associated session not found.'
+                    ], 404);
                 }
 
                 $sessionScreenshots = Screenshot::where('session_id', $session->id)
                     ->orderBy('created_at')
                     ->get();
 
-                $index = $sessionScreenshots->search(fn($ss) => $ss->id === $screenshot->id);
+                $index = $sessionScreenshots->search(
+                    fn($ss) => $ss->id === $screenshot->id
+                );
 
-                // CASE 1: Only screenshot in session → delete session entirely
+                // Only screenshot in session → delete session too
                 if ($sessionScreenshots->count() === 1) {
-                    if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
+
+                    if (
+                        $screenshot->screenshot_file &&
+                        \Storage::disk('public')->exists($screenshot->screenshot_file)
+                    ) {
+                        // File deletion intentionally disabled
                         // \Storage::disk('public')->delete($screenshot->screenshot_file);
                     }
 
@@ -197,11 +210,16 @@ class ScreenshotController extends Controller
 
                     DB::commit();
 
-                    return response()->json(['message' => 'Screenshot and session deleted (only screenshot).']);
+                    return response()->json([
+                        'message' => 'Screenshot and session deleted (only screenshot).'
+                    ]);
                 }
 
-                // Determine the adjustment range (from previous screenshot to current)
-                $prevScreenshot = $index > 0 ? $sessionScreenshots[$index - 1] : null;
+                // Determine adjustment range
+                $prevScreenshot = $index > 0
+                    ? $sessionScreenshots[$index - 1]
+                    : null;
+
                 $nextScreenshot = $sessionScreenshots[$index + 1] ?? null;
 
                 $adjustStart = $prevScreenshot
@@ -210,30 +228,30 @@ class ScreenshotController extends Controller
 
                 $adjustEnd = $nextScreenshot
                     ? $screenshot->created_at
-                    : $screenshot->created_at->copy(); // If last, adjust only that point
+                    : $screenshot->created_at->copy();
 
-                // Log this time removal — but ONLY for the parts of the range that are not
-                // already covered by an existing idle record. Blindly inserting the whole
-                // [previous screenshot -> this screenshot] span was a primary source of
-                // OVERLAPPING idle rows: the employee is frequently idle during part of those
-                // 4-9 minutes, so an idle row already existed and the overlap then got
-                // subtracted twice from worked time.
                 $adjustStartAt = Carbon::parse($adjustStart);
                 $adjustEndAt = Carbon::parse($adjustEnd);
 
                 if ($adjustEndAt->gt($adjustStartAt)) {
-                    // CLOSED rows only — an open row has no end, so subtractSlots would expand it
-                    // to "now" and one stale open row would swallow this entire range, leaving the
-                    // deleted screenshot's time still billed. Closed rows are also precisely what
-                    // the readers count.
-                    $overlappingIdle = SessionTimeAdjustment::where('session_id', $session->id)
+
+                    $overlappingIdle = SessionTimeAdjustment::where(
+                            'session_id',
+                            $session->id
+                        )
                         ->whereNotNull('end_time')
                         ->where('start_time', '<', $adjustEndAt)
                         ->where('end_time', '>', $adjustStartAt)
                         ->orderBy('start_time')
                         ->get();
 
-                    foreach ($this->subtractSlots($adjustStartAt, $adjustEndAt, $overlappingIdle) as $freeSlot) {
+                    foreach (
+                        $this->subtractSlots(
+                            $adjustStartAt,
+                            $adjustEndAt,
+                            $overlappingIdle
+                        ) as $freeSlot
+                    ) {
                         [$freeStart, $freeEnd] = $freeSlot;
 
                         if ($freeEnd->lte($freeStart)) {
@@ -248,8 +266,12 @@ class ScreenshotController extends Controller
                     }
                 }
 
-                // Delete screenshot file
-                if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
+                // Delete screenshot
+                if (
+                    $screenshot->screenshot_file &&
+                    \Storage::disk('public')->exists($screenshot->screenshot_file)
+                ) {
+                    // File deletion intentionally disabled
                     // \Storage::disk('public')->delete($screenshot->screenshot_file);
                 }
 
@@ -257,49 +279,125 @@ class ScreenshotController extends Controller
 
                 DB::commit();
 
-                return response()->json(['message' => 'Screenshot deleted and time adjustment logged.']);
+                return response()->json([
+                    'message' => 'Screenshot deleted and time adjustment logged.'
+                ]);
+
             } catch (\Exception $e) {
+
                 DB::rollBack();
-                return response()->json(['error' => 'Failed to delete screenshot.'], 500);
+
+                \Log::error('Failed to delete screenshot', [
+                    'screenshot_id' => $id,
+                    'user_id' => $userId,
+                    'error' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
+
+                return response()->json([
+                    'error' => 'Failed to delete screenshot.'
+                ], 500);
             }
 
-        }elseif(Auth::user()->user_role == 1 || Auth::user()->user_role == 2){
-             DB::beginTransaction();
+        }
+
+        // ============================================================
+        // ADMIN / MANAGER
+        // Role 1 & 2
+        // NO TIME ADJUSTMENTS
+        // ============================================================
+        elseif (
+            Auth::user()->user_role == 1 ||
+            Auth::user()->user_role == 2
+        ) {
+
+            DB::beginTransaction();
 
             try {
-                $screenshot = Screenshot::where('id', $id)
-                    ->firstOrFail();
+               $screenshot = Screenshot::withTrashed()
+                ->where('id', $id)
+                ->firstOrFail();
 
                 $session = WorkSession::find($screenshot->session_id);
 
                 if (!$session) {
-                    return response()->json(['error' => 'Associated session not found.'], 404);
+                    DB::rollBack();
+
+                    return response()->json([
+                        'error' => 'Associated session not found.'
+                    ], 404);
                 }
 
                 $sessionScreenshots = Screenshot::where('session_id', $session->id)
                     ->orderBy('created_at')
                     ->get();
 
-                $index = $sessionScreenshots->search(fn($ss) => $ss->id === $screenshot->id);
-
-                // CASE 1: Only screenshot in session → delete session entirely
+                // Only screenshot in session → delete session too
                 if ($sessionScreenshots->count() === 1) {
-                    if ($screenshot->screenshot_file && \Storage::disk('public')->exists($screenshot->screenshot_file)) {
-                         \Storage::disk('public')->delete($screenshot->screenshot_file);
+
+                    if (
+                        $screenshot->screenshot_file &&
+                        \Storage::disk('public')->exists($screenshot->screenshot_file)
+                    ) {
+                        \Storage::disk('public')->delete(
+                            $screenshot->screenshot_file
+                        );
                     }
 
-                    $screenshot->delete();
+                    $screenshot->forceDelete();
                     $session->delete();
 
                     DB::commit();
 
-                    return response()->json(['message' => 'Screenshot and session deleted (only screenshot).']);
+                    return response()->json([
+                        'message' => 'Screenshot and session deleted.'
+                    ]);
                 }
+
+                // ====================================================
+                // ADMIN:
+                // Delete screenshot ONLY.
+                // NO SessionTimeAdjustment
+                // ====================================================
+
+                if (
+                    $screenshot->screenshot_file &&
+                    \Storage::disk('public')->exists($screenshot->screenshot_file)
+                ) {
+                    \Storage::disk('public')->delete(
+                        $screenshot->screenshot_file
+                    );
+                }
+
+                $screenshot->delete();
+
+                DB::commit();
+
+                return response()->json([
+                    'message' => 'Screenshot deleted successfully.'
+                ]);
+
+            } catch (\Exception $e) {
+
+                DB::rollBack();
+
+                \Log::error('Failed to delete screenshot by admin', [
+                    'screenshot_id' => $id,
+                    'error' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
+
+                return response()->json([
+                    'error' => 'Failed to delete screenshot.'
+                ], 500);
             }
         }
 
-        
-
+        return response()->json([
+            'error' => 'Unauthorized.'
+        ], 403);
     }
 
     public function deletedScreenshots($session_id)
