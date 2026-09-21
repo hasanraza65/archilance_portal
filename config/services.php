@@ -46,6 +46,9 @@ return [
         'client_id' => env('ONEDRIVE_CLIENT_ID'),
         'client_secret' => env('ONEDRIVE_CLIENT_SECRET'),
         'refresh_token' => env('ONEDRIVE_REFRESH_TOKEN'),
+        'tenant_id' => env('ONEDRIVE_TENANT_ID'),
+        'relay_url' => env('ONEDRIVE_RELAY_URL'),
+        'relay_secret' => env('ONEDRIVE_RELAY_SECRET'),
     ],
 
 

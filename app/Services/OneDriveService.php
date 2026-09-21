@@ -18,9 +18,27 @@ class OneDriveService
    protected function fetchAccessToken(): string
 {
     $tenant = config('services.onedrive.tenant_id');
+    $relayUrl = config('services.onedrive.relay_url');
+    $relaySecret = config('services.onedrive.relay_secret');
 
-    $response = Http::asForm()->post(
-        "https://login.microsoftonline.com/{$tenant}/oauth2/v2.0/token",
+    $tokenPath = "/{$tenant}/oauth2/v2.0/token";
+
+    $request = Http::asForm();
+
+    if ($relayUrl) {
+        // IONOS blocks outbound requests to login.microsoftonline.com, so route
+        // the token refresh through a Cloudflare Worker relay instead.
+        $request = $request->withHeaders([
+            'X-Relay-Auth' => $relaySecret,
+            'X-Relay-Target' => 'login',
+        ]);
+        $url = rtrim($relayUrl, '/') . $tokenPath;
+    } else {
+        $url = "https://login.microsoftonline.com{$tokenPath}";
+    }
+
+    $response = $request->post(
+        $url,
         [
             'client_id'     => config('services.onedrive.client_id'),
             'client_secret' => config('services.onedrive.client_secret'),
