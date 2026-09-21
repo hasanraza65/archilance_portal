@@ -17,11 +17,18 @@ use Intervention\Image\Drivers\Gd\Driver;
 
 use Illuminate\Support\Str;
 use App\Traits\ResolvesClientTime;
+use App\Services\OneDriveService;
 
 
 class ScreenshotController extends Controller
 {
     use ResolvesClientTime;
+
+    // Screenshots captured from this instant onward are stored on OneDrive instead of the
+    // shared-hosting disk (which was hitting its storage limit and dropping uploads).
+    // Anything captured before this stays exactly where it already is — do not touch it.
+    // 2026-09-21 12:30 PM PKT (UTC+5) = 2026-09-21 07:30:00 UTC.
+    const ONEDRIVE_SCREENSHOT_CUTOVER = '2026-09-21 07:30:00';
 
     public function store(Request $request)
     {
@@ -107,41 +114,71 @@ class ScreenshotController extends Controller
 
             $file = $request->file('screenshot_image');
 
-            // store original image
-            $path = $file->store('uploads/screenshots', 'public');
+            // Screenshots taken from the OneDrive cutover onward go to OneDrive (the shared
+            // hosting disk was hitting its storage limit and dropping uploads). Anything
+            // captured before the cutover keeps using local disk exactly as before.
+            $useOneDrive = $capturedAt->greaterThanOrEqualTo(
+                Carbon::parse(self::ONEDRIVE_SCREENSHOT_CUTOVER, 'UTC')
+            );
+
+            $title = strtolower(trim($request->window_title ?? ''));
+            $shouldBlur = !empty($title) && Str::contains($title, 'whatsapp');
 
             $screenshot = new Screenshot();
 
-            $screenshot->screenshot_file = $path;
+            if ($useOneDrive) {
+                $ext = $file->getClientOriginalExtension() ?: 'jpg';
+                $basePath = 'screenshots/' . $userId . '/' . uniqid() . '.' . $ext;
 
-            $title = strtolower(trim($request->window_title ?? ''));
+                app(OneDriveService::class)->upload($basePath, file_get_contents($file->getRealPath()));
 
-            if (!empty($title) && Str::contains($title, 'whatsapp')) {
-                /*
-                if($userId == 159){
-                \Log::info('BLUR TRIGGERED: '.$title); // debug
-                } */
+                $screenshot->screenshot_file = $basePath;
 
-                $manager = new ImageManager(new Driver());
+                if ($shouldBlur) {
+                    $manager = new ImageManager(new Driver());
+                    $image = $manager->read($file->getRealPath());
+                    $image->blur(85);
 
-                // read from stored file (IMPORTANT FIX)
-                $image = $manager->read(Storage::disk('public')->path($path));
+                    $blurPath = 'screenshots/' . $userId . '/blur_' . uniqid() . '.' . $ext;
+                    app(OneDriveService::class)->upload($blurPath, (string) $image->encode());
 
-                $image->blur(85);
-
-                $blurPath = 'uploads/screenshots/blur_' . time() . '_' . $file->getClientOriginalName();
-
-                Storage::disk('public')->put($blurPath, (string) $image->encode());
-
-                $screenshot->emp_screenshot_file = $blurPath;
-
+                    $screenshot->emp_screenshot_file = $blurPath;
+                } else {
+                    $screenshot->emp_screenshot_file = $basePath;
+                }
             } else {
-                /*
-                if($userId == 159){
-                \Log::info('NO BLUR: '.$title); // debug
-                } */
+                // store original image
+                $path = $file->store('uploads/screenshots', 'public');
 
-                $screenshot->emp_screenshot_file = $path;
+                $screenshot->screenshot_file = $path;
+
+                if ($shouldBlur) {
+                    /*
+                    if($userId == 159){
+                    \Log::info('BLUR TRIGGERED: '.$title); // debug
+                    } */
+
+                    $manager = new ImageManager(new Driver());
+
+                    // read from stored file (IMPORTANT FIX)
+                    $image = $manager->read(Storage::disk('public')->path($path));
+
+                    $image->blur(85);
+
+                    $blurPath = 'uploads/screenshots/blur_' . time() . '_' . $file->getClientOriginalName();
+
+                    Storage::disk('public')->put($blurPath, (string) $image->encode());
+
+                    $screenshot->emp_screenshot_file = $blurPath;
+
+                } else {
+                    /*
+                    if($userId == 159){
+                    \Log::info('NO BLUR: '.$title); // debug
+                    } */
+
+                    $screenshot->emp_screenshot_file = $path;
+                }
             }
 
             $screenshot->session_id = $currentSession->id;
@@ -158,6 +195,37 @@ class ScreenshotController extends Controller
             'message' => 'Screenshot added successfully. Idle time (if active) was closed.',
             'screenshot' => $screenshot
         ]);
+    }
+
+    /**
+     * Delete a screenshot's underlying file(s) from wherever they actually live —
+     * local public disk (pre-cutover) or OneDrive (post-cutover). screenshot_file and
+     * emp_screenshot_file can point to two different files (blur variant), so both are
+     * checked independently.
+     */
+    private function deleteScreenshotFiles(Screenshot $screenshot): void
+    {
+        $paths = array_unique(array_filter([
+            $screenshot->screenshot_file,
+            $screenshot->emp_screenshot_file,
+        ]));
+
+        foreach ($paths as $path) {
+            if (\Storage::disk('public')->exists($path)) {
+                \Storage::disk('public')->delete($path);
+                continue;
+            }
+
+            // Not on local disk — it's an OneDrive path (post-cutover screenshot).
+            try {
+                app(OneDriveService::class)->delete($path);
+            } catch (\Exception $e) {
+                \Log::error('Failed to delete OneDrive screenshot file', [
+                    'path' => $path,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
     }
 
     public function destroy($id)
@@ -336,14 +404,7 @@ class ScreenshotController extends Controller
                 // Only screenshot in session → delete session too
                 if ($sessionScreenshots->count() === 1) {
 
-                    if (
-                        $screenshot->screenshot_file &&
-                        \Storage::disk('public')->exists($screenshot->screenshot_file)
-                    ) {
-                        \Storage::disk('public')->delete(
-                            $screenshot->screenshot_file
-                        );
-                    }
+                    $this->deleteScreenshotFiles($screenshot);
 
                     $screenshot->forceDelete();
                     $session->delete();
@@ -361,14 +422,7 @@ class ScreenshotController extends Controller
                 // NO SessionTimeAdjustment
                 // ====================================================
 
-                if (
-                    $screenshot->screenshot_file &&
-                    \Storage::disk('public')->exists($screenshot->screenshot_file)
-                ) {
-                    \Storage::disk('public')->delete(
-                        $screenshot->screenshot_file
-                    );
-                }
+                $this->deleteScreenshotFiles($screenshot);
 
                 $screenshot->delete();
 
